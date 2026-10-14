@@ -2,6 +2,8 @@
 
 Fortran research code for emulating coupled-channels calculations of sub-barrier heavy-ion fusion with eigenvector continuation (EC), a reduced-basis method (RBM). This CCFULL is solved by discrete basis method (DBM)
 
+Using the emulator, the speed factor can go to 200~300 compared with the discrete basis method.
+
 The implementation accompanies:
 
 > Z. Liao, K. Hagino, L. Zhu, S. Yoshida, and K. Uzawa,  
