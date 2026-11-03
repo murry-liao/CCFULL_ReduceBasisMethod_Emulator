@@ -1,0 +1,68 @@
+# CCFULL-ROM online prediction control (TOML syntax).
+
+[model]
+# The trained model: model_id and training_root as in emulator_train.in when
+# it was trained.  Its manifest gives the trained parameter box, energy range,
+# and experimental file.
+model_id = "16O_154Sm_Basis_300"
+training_root = "emulator/training_data"
+# Worker processes; each holds its own copy of the model and CCFULL library.
+workers = 1
+
+[parameter_domain]
+# "training": the box the model was trained on; "custom" may extend beyond it.
+range_source = "training"
+
+[parameter_domain.custom]
+# Equal endpoints fix a parameter. Values outside training enable extrapolation.
+beta2 = [0.300, 0.360]
+beta4 = [0.015, 0.095]
+beta6 = [0.0, 0.0]
+v0 = [165.0, 185.0]
+r0 = [0.900, 0.980]
+a0 = [1.00, 1.10]
+
+[prediction]
+# "single", "latin_hypercube", or "table".
+mode = "latin_hypercube"
+
+[prediction.single]
+# A single point may lie outside the trained or custom parameter domain.
+beta2 = 0.322
+beta4 = 0.050
+beta6 = 0.000
+v0 = 165.0
+r0 = 0.950
+a0 = 1.050
+
+[prediction.latin_hypercube]
+points = 100
+seed = 20261110
+
+[prediction.table]
+# Expected columns: beta2,beta4,beta6,v0,r0,a0
+parameter_file = "data/input_templates/rom_parameter_points.csv"
+
+[energies]
+# Any energy inside the trained range (energy.range of the training input) is allowed.
+# "experimental": the measured energies of the model's experimental file.
+# "grid": grid = [first, last, step] in MeV.  
+# "selected": the list below.
+source = "experimental"
+grid = [52.0, 100.0, 0.5]
+selected = []
+
+[comparison]
+include_experiment = true
+# Accuracy check: exact Numerov CCFULL at the same points and energies.
+# The run prints |sigma_ROM/sigma_exact - 1| and saves it in run_summary.json.
+exact_numerov = true
+# Requires exact_numerov = true. Reports exact Numerov time / ROM time.
+report_speedup = true
+
+[output]
+directory = "emulator/outputs"
+save_cross_sections_csv = true
+save_summary_json = true
+# One row per point: ROM time, exact Numerov time (if checked), and speedup.
+save_point_timings_csv = true
