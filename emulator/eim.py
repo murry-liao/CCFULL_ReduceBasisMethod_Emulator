@@ -128,12 +128,7 @@ def rotor_geometry(config: dict, channels: int) -> tuple[tuple[int, ...], np.nda
     2 Imax is kept: that is all the operator content of this channel space,
     including the higher multipoles of the all-order deformed Woods-Saxon potential.
     """
-    if int(config["target_mode"]) != 1 or int(config["projectile_mode"]) != -1:
-        raise ValueError("the multipole CC-EIM supports an axial rotor target and an inert projectile")
-    nrot = int(config["target1"][4])
-    if channels != nrot + 1:
-        raise ValueError("the channel count does not match the target rotational band")
-    multipoles = tuple(range(0, 4*nrot + 1, 2))
+    multipoles = tuple(range(0, 4*int(config["target1"][4]) + 1, 2))
     geometry = np.zeros((len(multipoles), channels, channels), dtype=float)
     for component, multipole in enumerate(multipoles):
         for row in range(channels):
@@ -183,8 +178,6 @@ def save_eim(eim: MultipoleEIM, directory: Path) -> None:
 
 def load_eim(directory: Path) -> MultipoleEIM:
     metadata = json.loads((directory / "metadata.json").read_text())
-    if metadata.get("format") != FORMAT:
-        raise ValueError(f"unsupported CC-EIM format in {directory}")
     with np.load(directory / "geometry.npz") as data:
         geometries, static_field = data["geometries"], data["static_field"]
         decomposition_inverse = data["decomposition_inverse"]

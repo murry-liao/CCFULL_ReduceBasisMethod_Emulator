@@ -7,8 +7,8 @@
    projection of every operator onto the basis.
 
 Each stage writes a manifest with its settings.  A finished stage is skipped
-while the configuration still matches; a directory trained with other
-settings is refused instead of being overwritten.
+while the input still matches; a directory trained with other settings is
+refused instead of being overwritten.
 """
 
 from __future__ import annotations
@@ -16,24 +16,86 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import csv
+from dataclasses import dataclass
 import hashlib
 from itertools import repeat
 import json
+import math
 from pathlib import Path
 import time
 
 import numpy as np
 
-from emulator.config import (DEFAULT_TRAINING_INPUT, MODEL_FORMAT, PARAMETER_NAMES, TrainConfig,
-                             latin_hypercube, load_train_config, project_relative)
 from emulator.eim import (MultipoleEIM, RadialEIM, field_radii, rotor_geometry, rotor_static_field,
                           save_eim)
-from emulator.rom import ROM, Projector, Reaction
+from emulator.rom import (MODEL_FORMAT, PARAMETER_NAMES, PROJECT_ROOT, ROM, Projector, Reaction,
+                          latin_hypercube, project_path, project_relative)
 from physical_model import ccfull
-from physical_model.inputs import records_sha256
+from physical_model.inputs import (data_lines, energy_values, load_dataset, numbers, parse_input,
+                                   reaction_label, records_sha256)
 
 
+DEFAULT_INPUT = PROJECT_ROOT / "emulator" / "emulator_train.in"
 WAVE_POD_FORMAT = "global_wave_pod_v1"
+
+
+@dataclass(frozen=True)
+class TrainingInput:
+    """emulator_train.in; its lines are explained at the end of the file."""
+
+    source: Path                         # this file; lines 1-9 are the CCFULL input of the model
+    reaction: str                        # for example "A=16, Z=8 + A=154, Z=62"
+    model_id: str                        # line 10
+    experimental_file: Path              # line 11
+    training_root: Path                  # line 12
+    bounds: np.ndarray                   # lines 13-14: [lower, upper] per parameter, PARAMETER_NAMES order
+    energy_source: str                   # line 15: "experimental", "ccfull", or "custom"
+    energy_range: tuple[float, float]    # MeV
+    training_points: int                 # line 16: snapshots, one exact CCFULL solve each
+    rank: int                            # POD modes kept for the basis
+    seed: int
+    workers: int                         # CCFULL processes at a time
+    eim_points: int                      # line 17: parameter points of the CC-EIM training
+    eim_seed: int
+    eim_tolerance: float
+    eim_max_rank: int                    # per multipole
+
+    @property
+    def wave_pod_dir(self) -> Path:
+        return self.training_root / "wave_pod" / self.model_id
+
+    @property
+    def cc_eim_dir(self) -> Path:
+        return self.training_root / "operator_eim" / self.model_id
+
+
+def read_input(path: str | Path) -> TrainingInput:
+    """Read emulator_train.in line by line."""
+    source = Path(path).resolve()
+    physical = parse_input(source)
+    model_id, data_file, root, deformations, potential, energy, wave_pod, cc_eim = data_lines(source)[9:17]
+    if model_id == "auto":
+        model_id = f"a{physical['apro']}_z{physical['zpro']}__a{physical['atar']}_z{physical['ztar']}"
+    experimental_file = project_path(data_file)
+    if energy == "experimental":
+        # The measured energies, rounded outward to whole MeV.
+        measured = [row["energy_cm_mev"] for row in load_dataset(experimental_file)]
+        energy_range = (float(math.floor(min(measured))), float(math.ceil(max(measured))))
+    elif energy == "ccfull":
+        grid = energy_values(physical)
+        energy_range = (float(min(grid)), float(max(grid)))
+    else:
+        energy, energy_range = "custom", tuple(numbers(energy))
+    training_points, rank, seed, workers = map(int, numbers(wave_pod))
+    eim_points, eim_seed, eim_tolerance, eim_max_rank = numbers(cc_eim)
+    return TrainingInput(
+        source=source, reaction=reaction_label(physical), model_id=model_id,
+        experimental_file=experimental_file, training_root=project_path(root),
+        bounds=np.reshape(numbers(deformations) + numbers(potential), (6, 2)),
+        energy_source=energy, energy_range=energy_range,
+        training_points=training_points, rank=rank, seed=seed, workers=workers,
+        eim_points=int(eim_points), eim_seed=int(eim_seed), eim_tolerance=eim_tolerance,
+        eim_max_rank=int(eim_max_rank))
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -42,11 +104,11 @@ def _write_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
-def _reaction(config: TrainConfig) -> Reaction:
-    return Reaction(config.source, [config.bounds[name] for name in PARAMETER_NAMES], config.energy_range)
+def _reaction(config: TrainingInput) -> Reaction:
+    return Reaction(config.source, config.bounds, config.energy_range)
 
 
-def _identity(config: TrainConfig) -> dict:
+def _identity(config: TrainingInput) -> dict:
     """The settings that identify the physical model, the training box, and the energy range."""
     return {
         "model_id": config.model_id,
@@ -55,7 +117,7 @@ def _identity(config: TrainConfig) -> dict:
         "solver_sha256": ccfull.source_sha256(),
         "experimental_file": project_relative(config.experimental_file),
         "parameter_names": list(PARAMETER_NAMES),
-        "parameter_bounds": [list(config.bounds[name]) for name in PARAMETER_NAMES],
+        "parameter_bounds": config.bounds.tolist(),
         "energy_range_mev": list(config.energy_range),
     }
 
@@ -74,7 +136,7 @@ def _trained(manifest: Path, settings: dict) -> bool:
         return True
     raise ValueError(
         f"{manifest.parent} holds a model trained with other settings ({', '.join(changed)}). "
-        "Move that directory out of training_data, or set another model.model_id, and train again.")
+        "Move that directory out of training_data, or change model_id (line 10), and train again.")
 
 
 def training_design(reaction: Reaction, count: int, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -101,7 +163,7 @@ def _snapshot(config: dict, point: np.ndarray, energy: float, angular_momentum: 
     return (vector / norm).astype(np.complex64), result
 
 
-def train_wave_pod(config: TrainConfig) -> Path:
+def train_wave_pod(config: TrainingInput) -> Path:
     """Stage 1: exact snapshots on a Latin hypercube in (theta, E, J), and their POD basis."""
     directory = config.wave_pod_dir
     manifest = directory / "manifest.json"
@@ -127,13 +189,11 @@ def train_wave_pod(config: TrainConfig) -> Path:
             if done % step == 0 or done == count:
                 print(f"[wave_pod] snapshots {done}/{count}", flush=True)
     radius, channels = first["radius"], int(vectors[0].shape[1])
-    if vectors[0].shape[0] != radius.size:
-        raise RuntimeError("snapshot rows do not match the CCFULL radial grid")
     vectors = np.stack(vectors).reshape(count, -1)
     snapshot_seconds = time.perf_counter() - started
     if config.rank > min(vectors.shape):
-        raise ValueError(f"wave_pod.rank = {config.rank} exceeds the {min(vectors.shape)} POD modes "
-                         "of these snapshots")
+        raise ValueError(f"the basis rank {config.rank} (line 16) exceeds the {min(vectors.shape)} "
+                         "POD modes of these snapshots")
     started = time.perf_counter()
     left, values, _ = np.linalg.svd(vectors.T.astype(np.complex128), full_matrices=False)
     pod_seconds = time.perf_counter() - started
@@ -165,7 +225,7 @@ def train_wave_pod(config: TrainConfig) -> Path:
     return manifest
 
 
-def train_eim(reaction: Reaction, radius: np.ndarray, channels: int, config: TrainConfig) -> tuple:
+def train_eim(reaction: Reaction, radius: np.ndarray, channels: int, config: TrainingInput) -> tuple:
     """The multipole CC-EIM from potential evaluations at parameter points; no wave solves."""
     points = latin_hypercube(reaction.bounds, config.eim_points, config.eim_seed)
     multipoles, geometries = rotor_geometry(reaction.config, channels)
@@ -206,11 +266,9 @@ def train_eim(reaction: Reaction, radius: np.ndarray, channels: int, config: Tra
     return eim, diagnostics
 
 
-def train_cc_eim(config: TrainConfig) -> Path:
+def train_cc_eim(config: TrainingInput) -> Path:
     """Stage 2: CC-EIM of the coupling field and the Galerkin projection of every operator."""
     parent = config.wave_pod_dir / "manifest.json"
-    if not parent.is_file():
-        raise FileNotFoundError(f"train the wave_pod stage first: {parent} does not exist")
     directory = config.cc_eim_dir
     manifest = directory / "manifest.json"
     settings = {**_identity(config),
@@ -224,8 +282,6 @@ def train_cc_eim(config: TrainConfig) -> Path:
         print(f"[cc_eim] already trained: {project_relative(manifest)}", flush=True)
         return manifest
     wave_pod = json.loads(parent.read_text())
-    if wave_pod.get("format") != WAVE_POD_FORMAT:
-        raise ValueError(f"unsupported wave-POD format {wave_pod.get('format')!r} in {parent}")
     with np.load(parent.parent / wave_pod["basis"]) as data:
         basis, radius = data["basis"], data["radius"]
     reaction = _reaction(config)
@@ -262,29 +318,33 @@ def train_cc_eim(config: TrainConfig) -> Path:
     return manifest
 
 
-def _report(config: TrainConfig) -> None:
+def _report(config: TrainingInput) -> None:
+    """What each line of the input was read as."""
+    names = ("beta2", "beta4", "beta6", "V0", "r0", "a0")
+    bounds = [f"{name} [{lower:g}, {upper:g}]" for name, (lower, upper) in zip(names, config.bounds)]
     lower, upper = config.energy_range
-    print(f"Valid training configuration: {config.source}")
-    print(f"model: {config.model_id} ({config.reaction})")
-    print(f"wave POD: {config.training_points} snapshots (exact CCFULL solves) -> basis of "
-          f"{config.rank} vectors; seed {config.seed}, {config.workers} CCFULL processes")
-    print(f"energy range: {lower:g}-{upper:g} MeV ({config.energy_source})")
-    print("parameter bounds: " + ", ".join(f"{name}={list(bounds)}" for name, bounds in config.bounds.items()))
-    fixed = {name: bounds[0] for name, bounds in config.bounds.items() if bounds[0] == bounds[1]}
-    if fixed:
-        print("fixed parameters: " + ", ".join(f"{name}={value}" for name, value in fixed.items()))
-    print(f"CC-EIM: {config.eim_points} potential evaluations, tolerance {config.eim_tolerance:g}, "
-          f"at most {config.eim_max_rank} modes per multipole")
+    print(f"Training input {config.source}")
+    print(f"  lines 1-9  CCFULL input of {config.reaction}")
+    print(f"  line 10    model_id {config.model_id}")
+    print(f"  line 11    experimental data {project_relative(config.experimental_file)}")
+    print(f"  line 12    training_root {project_relative(config.training_root)}")
+    print(f"  line 13    {', '.join(bounds[:3])}")
+    print(f"  line 14    {', '.join(bounds[3:])}")
+    print(f"  line 15    energy range {lower:g}-{upper:g} MeV ({config.energy_source})")
+    print(f"  line 16    {config.training_points} snapshots, basis rank {config.rank}, "
+          f"seed {config.seed}, {config.workers} CCFULL process(es)")
+    print(f"  line 17    CC-EIM: {config.eim_points} parameter points, seed {config.eim_seed}, "
+          f"tolerance {config.eim_tolerance:g}, at most {config.eim_max_rank} modes per multipole")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--config", type=Path, default=DEFAULT_TRAINING_INPUT)
+    parser.add_argument("--config", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--stage", choices=("all", "wave_pod", "cc_eim"), default="all")
     parser.add_argument("--check", action="store_true",
-                        help="check the input file without training")
+                        help="print what each line of the input was read as, without training")
     args = parser.parse_args()
-    config = load_train_config(args.config)
+    config = read_input(args.config)
     if args.check:
         _report(config)
         return

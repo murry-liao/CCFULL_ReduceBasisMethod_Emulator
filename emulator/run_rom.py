@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 import csv
+from dataclasses import dataclass
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -22,9 +24,82 @@ for _variable in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 
 import numpy as np
 
-from emulator.config import DEFAULT_ROM_INPUT, PARAMETER_NAMES, RomConfig, load_rom_config, project_relative
-from emulator.rom import ROM
-from physical_model.inputs import load_dataset
+from emulator.rom import (PARAMETER_NAMES, PROJECT_ROOT, ROM, latin_hypercube, project_path,
+                          project_relative, read_manifest)
+from physical_model.inputs import data_lines, load_dataset, numbers, parse_input, reaction_label
+
+
+DEFAULT_INPUT = PROJECT_ROOT / "emulator" / "emulator_rom.in"
+
+
+@dataclass(frozen=True)
+class RomInput:
+    """emulator_rom.in, completed from the manifest of its model; its lines are explained at the end."""
+
+    source: Path
+    model_id: str                        # line 1
+    manifest: Path                       # line 2: training_root/operator_eim/<model_id>/manifest.json
+    workers: int                         # line 3
+    mode: str                            # line 4: "single", "latin_hypercube", or "table"
+    points: np.ndarray                   # lines 5-7: (point, parameter), PARAMETER_NAMES order
+    box: str                             # line 8: "training" or "custom"
+    bounds: np.ndarray                   # the Latin-hypercube box; lines 9-10 if custom
+    energy_source: str                   # line 11: "experimental", "grid", or "selected"
+    energies: np.ndarray                 # lines 12-13, MeV
+    include_experiment: bool             # line 14
+    exact_numerov: bool
+    report_speedup: bool
+    output_dir: Path                     # line 15
+    save_cross_sections_csv: bool        # line 16
+    save_summary_json: bool
+    save_point_timings_csv: bool
+    reaction: str                        # the rest is recorded in the manifest of the model
+    rank: int
+    experimental_file: Path
+    trained_bounds: np.ndarray
+    energy_range: tuple[float, float]
+
+
+def read_input(path: str | Path) -> RomInput:
+    """Read emulator_rom.in line by line; the trained box, energies, and data come from the model."""
+    source = Path(path).resolve()
+    (model_id, root, workers, mode, single, lhs, table, box, deformations, potential,
+     energy_source, grid, selected, switches, output_dir, saves) = data_lines(source)[:16]
+    manifest = project_path(root) / "operator_eim" / model_id / "manifest.json"
+    trained = read_manifest(manifest)
+    settings = trained["settings"]
+    trained_bounds = np.asarray(settings["parameter_bounds"], dtype=float)
+    experimental_file = project_path(settings["experimental_file"])
+    bounds = (trained_bounds if box == "training"
+              else np.reshape(numbers(deformations) + numbers(potential), (6, 2)))
+    if mode == "single":
+        points = np.asarray([numbers(single)])
+    elif mode == "latin_hypercube":
+        count, seed = map(int, numbers(lhs))
+        points = latin_hypercube(bounds, count, seed)
+    else:
+        points = np.loadtxt(project_path(table), delimiter=",", skiprows=1, ndmin=2)
+    if energy_source == "experimental":
+        energies = [row["energy_cm_mev"] for row in load_dataset(experimental_file)]
+    elif energy_source == "grid":
+        first, last, step = numbers(grid)
+        count = int(math.floor((last - first) / step + 1.0e-9)) + 1
+        energies = [round(first + index * step, 10) for index in range(count)]
+    else:
+        energies = numbers(selected)
+    include_experiment, exact_numerov, report_speedup = (value != 0 for value in numbers(switches))
+    save_csv, save_json, save_timings = (value != 0 for value in numbers(saves))
+    return RomInput(
+        source=source, model_id=model_id, manifest=manifest, workers=int(numbers(workers)[0]),
+        mode=mode, points=points, box=box, bounds=bounds,
+        energy_source=energy_source, energies=np.asarray(energies, dtype=float),
+        include_experiment=include_experiment, exact_numerov=exact_numerov,
+        report_speedup=report_speedup and exact_numerov,      # the speedup needs the exact check
+        output_dir=project_path(output_dir), save_cross_sections_csv=save_csv,
+        save_summary_json=save_json, save_point_timings_csv=save_timings,
+        reaction=reaction_label(parse_input(project_path(settings["input_file"]))),
+        rank=int(trained["rank"]), experimental_file=experimental_file,
+        trained_bounds=trained_bounds, energy_range=tuple(settings["energy_range_mev"]))
 
 
 _MODEL: ROM | None = None      # the model of this process, with its own CCFULL library
@@ -63,13 +138,16 @@ def _evaluate(function, tasks: list, pool, stage: str) -> tuple[np.ndarray, np.n
     return np.asarray(values), np.asarray(seconds), time.perf_counter() - started
 
 
-def _outside(point: np.ndarray, bounds: dict) -> dict:
+def _domain(bounds: np.ndarray) -> dict:
+    return {name: [float(lower), float(upper)] for name, (lower, upper) in zip(PARAMETER_NAMES, bounds)}
+
+
+def _outside(point: np.ndarray, bounds: np.ndarray) -> dict:
     """The parameters of ``point`` outside the trained box, with their trained range."""
     outside = {}
-    for name, value in zip(PARAMETER_NAMES, map(float, point)):
-        lower, upper = bounds[name]
+    for name, value, (lower, upper) in zip(PARAMETER_NAMES, map(float, point), bounds):
         if value < lower or value > upper:
-            outside[name] = {"value": value, "trained_range": [lower, upper]}
+            outside[name] = {"value": value, "trained_range": [float(lower), float(upper)]}
     return outside
 
 
@@ -136,7 +214,7 @@ def _point_timings(points: np.ndarray, rom_seconds: np.ndarray,
     return rows
 
 
-def _save(config: RomConfig, rom: np.ndarray, exact: np.ndarray | None, experiment: list[dict],
+def _save(config: RomInput, rom: np.ndarray, exact: np.ndarray | None, experiment: list[dict],
           accuracy: dict | None, timings: dict, point_timings: list[dict]) -> Path:
     """Write cross_sections.csv, point_timings.csv, and run_summary.json into a new run directory."""
     created = datetime.now().astimezone()
@@ -171,9 +249,8 @@ def _save(config: RomConfig, rom: np.ndarray, exact: np.ndarray | None, experime
             "reaction_system": config.reaction,
             "basis_rank": config.rank,
             "prediction_mode": config.mode,
-            "parameter_domain": {name: list(config.bounds[name]) for name in PARAMETER_NAMES},
-            "training_parameter_domain": {name: list(config.trained_bounds[name])
-                                          for name in PARAMETER_NAMES},
+            "parameter_domain": _domain(config.bounds),
+            "training_parameter_domain": _domain(config.trained_bounds),
             "training_energy_range_mev": list(config.energy_range),
             "energies": {"source": config.energy_source,
                          "values_mev": [float(value) for value in config.energies]},
@@ -188,27 +265,37 @@ def _save(config: RomConfig, rom: np.ndarray, exact: np.ndarray | None, experime
     return destination
 
 
-def _report(config: RomConfig) -> None:
+def _report(config: RomInput) -> None:
+    """What each line of the input was read as."""
+    names = ("beta2", "beta4", "beta6", "V0", "r0", "a0")
+    yes = {True: "yes", False: "no"}
     points, energies = config.points, config.energies
-    print(f"Valid ROM configuration: {config.source}")
-    print(f"Model: {config.model_id} ({config.reaction}), basis rank {config.rank}")
-    print(f"Prediction mode: {config.mode} ({len(points)} point{'s' if len(points) != 1 else ''}); "
-          f"{config.workers} worker process(es)")
-    print(f"Parameter domain: {config.range_source}; energies: {config.energy_source} ({energies.size} "
-          f"between {energies.min():g} and {energies.max():g} MeV)")
-    print(f"Accuracy check against exact Numerov: {config.exact_numerov}; "
-          f"report speedup: {config.report_speedup}")
-    if len(points) == 1:
-        print("Prediction: " + ", ".join(f"{name}={value}" for name, value in zip(PARAMETER_NAMES, points[0])))
+    single = (": " + ", ".join(f"{name}={value:g}" for name, value in zip(names, points[0]))
+              if config.mode == "single" else "")
+    print(f"ROM input {config.source}")
+    print(f"  lines 1-2    model {config.model_id} ({config.reaction}), basis rank {config.rank}: "
+          f"{project_relative(config.manifest)}")
+    print(f"  line 3       {config.workers} worker process(es)")
+    print(f"  lines 4-7    {config.mode}, {len(points)} point(s){single}")
+    print(f"  lines 8-10   {config.box} box: " + ", ".join(
+        f"{name} [{lower:g}, {upper:g}]" for name, (lower, upper) in zip(names, config.bounds)))
+    print(f"  lines 11-13  {config.energy_source} energies: {energies.size} between "
+          f"{energies.min():g} and {energies.max():g} MeV")
+    print(f"  line 14      experiment {yes[config.include_experiment]}, exact Numerov check "
+          f"{yes[config.exact_numerov]}, speedup {yes[config.report_speedup]}")
+    print(f"  line 15      output directory {project_relative(config.output_dir)}")
+    print(f"  line 16      write cross_sections.csv {yes[config.save_cross_sections_csv]}, "
+          f"run_summary.json {yes[config.save_summary_json]}, "
+          f"point_timings.csv {yes[config.save_point_timings_csv]}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--config", type=Path, default=DEFAULT_ROM_INPUT)
+    parser.add_argument("--config", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--check", action="store_true",
-                        help="check the input file and the trained model without running")
+                        help="print what each line of the input was read as, without running")
     args = parser.parse_args()
-    config = load_rom_config(args.config)
+    config = read_input(args.config)
     if args.check:
         _report(config)
         return

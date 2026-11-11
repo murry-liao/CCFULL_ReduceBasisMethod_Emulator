@@ -1,0 +1,41 @@
+16,8,154,62
+1.2,-1,1.06,1
+0.082,0.322,0.05,0.00,6
+1.66,0.11,2,0
+6.13,0.733,3,1
+0,0.,0.3
+165,0.95,1.05
+50.,75.,1
+30,0.05
+16O_154Sm_Basis_300
+data/experimental/4-final-ngt4/fusion-exp-8.16.62.154-tb-1995-611.txt
+emulator/training_data
+0.300,0.360, 0.015,0.095, 0.0,0.0
+165.0,185.0, 0.900,0.980, 1.00,1.10
+experimental
+4000,300,20261103,1
+200,20261101,1.0e-5,20
+-------------------------------------------------------------------------------
+CCFULL-ROM training input.  The lines are read in order; blank lines and lines
+starting with # are skipped, and everything after line 17 is ignored.  Paths
+are relative to the project root.
+
+ 1-9  CCFULL input of the reaction (CCFULL manual).  Line 3 is the rotor
+      record E2T,beta2,beta4,beta6,NrotT.
+ 10   model_id: name of the trained model and of its directories in
+      training_data and outputs.  auto: aAP_zZP__aAT_zZT, e.g. a16_z8__a154_z62.
+ 11   experimental data file of this reaction.
+ 12   training_root: directory of the trained models.
+ 13   bounds of beta2, beta4, beta6: lower,upper of each.  Equal bounds fix
+      a parameter, e.g. 0.0,0.0 for beta6.
+ 14   bounds of V0 (MeV), r0 (fm), a0 (fm), as line 13.
+ 15   energy range of the model; any energy inside it can be emulated.
+      experimental: the measured energies of line 11, rounded outward to MeV.
+      ccfull: Emin and Emax of line 8.  Or lower,upper in MeV, e.g. 52.0,100.0.
+ 16   snapshots, basis rank, seed, CCFULL processes at a time.  The snapshots
+      are Latin-hypercube points in (beta2, beta4, beta6, V0, r0, a0, E, J),
+      one exact CCFULL solve each; J is drawn from the partial waves CCFULL
+      needs at that energy.  The basis keeps that many POD modes of them, and
+      each online (E, J) solve is a rank x rank system.
+ 17   CC-EIM of the coupling field: parameter points (potential evaluations
+      only), seed, tolerance, maximum modes per multipole.

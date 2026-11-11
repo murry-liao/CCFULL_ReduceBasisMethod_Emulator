@@ -85,22 +85,26 @@ Run all commands from the repository root. The repository ships without trained
 models, so the first step is training.
 
 ```bash
-python -m emulator.train --check       # validate emulator/configs/emulator_train.in
+python -m emulator.train --check       # print how each line of emulator/emulator_train.in is read
 python -u -m emulator.train            # stage 1 (snapshots, basis), then stage 2 (CC-EIM, projection)
 
-python -m emulator.run_rom --check     # validate emulator/configs/emulator_rom.in and its trained model
+python -m emulator.run_rom --check     # print how each line of emulator/emulator_rom.in is read
 python -m emulator.run_rom             # emulate and check against exact CCFULL; results in emulator/outputs/
 ```
 
-**Analysis notebook.** `emulator/analysis/parameter_analysis.ipynb` reads a run
-directory from `emulator/outputs/`. It shows the χ² ranking, parameter
-profiles, the best-fit excitation function against experiment, and the barrier
-distribution D(E) = d²(Eσ)/dE². Set `INPUT_FILE` near the top of the notebook
-to your run.
+Both input files are written like a CCFULL input: one item, or a few
+comma-separated numbers, per line, with every line explained at the end of the
+file. See [`emulator/README.md`](emulator/README.md).
+
+**Analysis notebook.** `emulator/parameter_analysis.ipynb` reads a run
+directory from `emulator/outputs/`. It finds the best parameter point by χ²
+against experiment, and plots the excitation function and the barrier
+distribution D(E) = d²(Eσ)/dE² at that point. Set `RUN` at the top of the
+notebook to your run.
 
 ```bash
 python -m pip install -e ".[notebook]"
-python -m jupyter lab emulator/analysis/parameter_analysis.ipynb
+python -m jupyter lab emulator/parameter_analysis.ipynb
 ```
 
 ## Repository layout
@@ -108,18 +112,18 @@ python -m jupyter lab emulator/analysis/parameter_analysis.ipynb
 ```text
 .
 ├── emulator/
-│   ├── train.py                     offline entry point: snapshots, POD, CC-EIM, projection
-│   ├── run_rom.py                   online entry point: predictions and the accuracy check
-│   ├── config.py                    the two input files and trained-model manifests
-│   ├── rom.py                       Galerkin projection and the online solve
+│   ├── train.py                     reads emulator_train.in; snapshots, POD, CC-EIM, projection
+│   ├── run_rom.py                   reads emulator_rom.in; predictions and the accuracy check
+│   ├── emulator_train.in            training input: CCFULL records + training lines, explained at the end
+│   ├── emulator_rom.in              prediction input, explained at the end
+│   ├── rom.py                       Galerkin projection, the online solve, trained-model manifests
 │   ├── eim.py                       multipole CC-EIM of the coupling field
-│   ├── configs/                     training and query inputs
-│   ├── analysis/                    parameter-analysis notebook and analysis scripts
+│   ├── parameter_analysis.ipynb     best parameters, excitation function, barrier distribution
 │   ├── training_data/               generated models (not tracked)
 │   └── outputs/                     generated query results (not tracked)
 ├── physical_model/
 │   ├── ccfull.py                    compiles and calls CCFULL
-│   ├── inputs.py                    CCFULL records and experimental data files
+│   ├── inputs.py                    CCFULL records, line-based inputs, experimental data files
 │   ├── solvers/standard_numerov/    Fortran 90 CCFULL with standard Numerov, and its two drivers
 │   └── build/                       generated binaries (not tracked)
 ├── data/

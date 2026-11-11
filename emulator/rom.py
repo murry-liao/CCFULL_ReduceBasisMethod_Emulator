@@ -16,19 +16,60 @@ map depends on (E, J) only and is cached per energy.
 from __future__ import annotations
 
 import itertools
+import json
 from pathlib import Path
 
 import numpy as np
+from scipy.stats import qmc
 
-from emulator.config import PARAMETER_NAMES, project_path, read_manifest
 from emulator.eim import MultipoleEIM, field_radii, load_eim
 from physical_model import ccfull
 from physical_model.ccfull import HBARC
-from physical_model.inputs import parse_input
+from physical_model.inputs import parse_input, records_sha256
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PARAMETER_NAMES = ("beta2", "beta4", "beta6", "v0", "r0", "a0")
+MODEL_FORMAT = "global_projection_cc_eim_v1"
 # The arrays of reduced_operators.npz besides radius, reduced_mass, and zz.
 ARRAYS = ("x0", "x1", "xn", "xnm2", "p_d2", "p_one", "p_coul", "p_cent", "a_static", "a_modes")
+
+
+def project_path(path: str | Path) -> Path:
+    """A path of an input file or a manifest: relative to the project root, or absolute."""
+    return (PROJECT_ROOT / Path(path).expanduser()).resolve()
+
+
+def project_relative(path: str | Path) -> str:
+    """``path`` as a manifest records it: relative to the project root, or absolute outside it."""
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def latin_hypercube(bounds, count: int, seed: int) -> np.ndarray:
+    """``count`` Latin-hypercube points inside ``bounds`` (n, 2); equal bounds fix a coordinate."""
+    limits = np.asarray(bounds, dtype=float)
+    points = np.repeat(limits[:, 0][None, :], count, axis=0)
+    active = limits[:, 1] > limits[:, 0]
+    if np.any(active):
+        unit = qmc.LatinHypercube(int(np.sum(active)), seed=seed).random(count)
+        points[:, active] = qmc.scale(unit, limits[active, 0], limits[active, 1])
+    return points
+
+
+def read_manifest(path: str | Path) -> dict:
+    """A trained model's manifest; refused if ccfull.f90 or the nine CCFULL records changed since."""
+    manifest = json.loads(Path(path).read_text())
+    settings = manifest["settings"]
+    if settings["solver_sha256"] != ccfull.source_sha256():
+        raise ValueError(f"{path} was trained with another ccfull.f90; train the model again")
+    if settings["physical_input_sha256"] != records_sha256(project_path(settings["input_file"])):
+        raise ValueError(f"{path} was trained with other CCFULL records than {settings['input_file']} "
+                         "now holds; restore them or train the model again")
+    return manifest
 
 
 def fusion_cross_section(penetrabilities, waves, energy: float, reduced_mass: float) -> float:

@@ -1,0 +1,45 @@
+16O_154Sm_Basis_300
+emulator/training_data
+1
+latin_hypercube
+0.322,0.050,0.000,165.0,0.950,1.050
+100,20261110
+data/input_templates/rom_parameter_points.csv
+training
+0.300,0.360, 0.015,0.095, 0.0,0.0
+165.0,185.0, 0.900,0.980, 1.00,1.10
+experimental
+52.0,100.0,0.5
+60.0,70.0,80.0
+1,1,1
+emulator/outputs
+1,1,1
+-------------------------------------------------------------------------------
+CCFULL-ROM prediction input.  The lines are read in order; blank lines and
+lines starting with # are skipped, and everything after line 16 is ignored.
+Paths are relative to the project root.  The trained parameter box, energy
+range, and experimental data come from the manifest of the model.
+
+ 1   model_id of the trained model (line 10 of emulator_train.in).
+ 2   training_root it was trained into (line 12 of emulator_train.in).
+ 3   worker processes; each loads its own copy of the model and of CCFULL.
+ 4   prediction mode: single (line 5), latin_hypercube (line 6), or table
+     (line 7).
+ 5   single point: beta2,beta4,beta6,V0,r0,a0.  It may lie outside the box.
+ 6   Latin hypercube: number of points, seed.
+ 7   table of points: a CSV file with a header line and the columns
+     beta2,beta4,beta6,v0,r0,a0 in this order.
+ 8   box of the Latin hypercube: training (the box of the model), or custom
+     (lines 9-10), which may extend beyond it.
+ 9   custom bounds of beta2, beta4, beta6, as line 13 of emulator_train.in.
+ 10  custom bounds of V0, r0, a0, as line 14 of emulator_train.in.
+ 11  energies: experimental (the measured energies of the model's data), grid
+     (line 12), or selected (line 13).  They must lie in the trained range.
+ 12  energy grid: first, last, step in MeV.
+ 13  selected energies in MeV; keep a value here even when it is not used.
+ 14  1 = yes, 0 = no: show the measured cross sections; check against exact
+     Numerov CCFULL at the same points and energies; report exact time / ROM
+     time (needs the check).
+ 15  output directory; every run writes a new timestamped directory in it.
+ 16  1 = yes, 0 = no: write cross_sections.csv, run_summary.json, and
+     point_timings.csv (ROM and exact time of every point).

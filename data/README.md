@@ -14,7 +14,7 @@ emulator dataset is
 
 `input_templates/rom_parameter_points.csv` is the six-column batch-query
 template used by `emulator_rom.in`. The CCFULL input of a trained system is
-the first nine records of `../emulator/configs/emulator_train.in`.
+the first nine records of `../emulator/emulator_train.in`.
 
 Generated wave bases, emulator models, analyses, and online results belong
 under `../emulator/`.

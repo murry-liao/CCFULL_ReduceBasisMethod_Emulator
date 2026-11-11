@@ -1739,10 +1739,11 @@ Subroutine rkutta00(psi0, phi0, psi1)
 
 End Subroutine rkutta00
 
-Subroutine stabilize(xi1, xi, aa, ir1)
+Subroutine stabilize(xi1, xi, aa, ir1, psi_out)
   Use ccfull_initialization_mod
   Implicit None
   Integer, Intent(In)  ::ir1
+  complex*16, Intent(Out) :: psi_out(Nlevelmax, Nlevelmax)
   complex*16, Intent(Inout)  ::  aa(Nlevelmax, Nlevelmax)
   complex*16, Intent(Inout)  ::  xi(Nlevelmax, Nlevelmax)
   complex*16, Intent(Inout)  ::  xi1(Nlevelmax, Nlevelmax)
@@ -1786,6 +1787,8 @@ Subroutine stabilize(xi1, xi, aa, ir1)
         End Do
       End Do
   End Do
+  psi_out = (0.d0, 0.d0)
+  psi_out(1:Nlevel, 1:Nlevel) = psi(1:Nlevel, 1:Nlevel)
 
   Do i = 1, nlevel
       Do j = 1, nlevel
@@ -1836,6 +1839,12 @@ Subroutine Numerov_core(P, capture_snapshot)
   complex*16, dimension(Nlevelmax, Nlevelmax) :: xi1d, xi0d
   complex*16, dimension(Nlevelmax, Nlevelmax) :: aa, bb0, bb20
   complex*16, allocatable :: fundamental(:,:,:)
+  ! Stabilization every 0.5 fm keeps the propagated solutions independent; the
+  ! wave function is rebuilt segment by segment, never in the r_min basis.
+  complex*16, dimension(Nlevelmax, Nlevelmax) :: eye, psi_stab, b0in, tmp
+  complex*16, allocatable :: stab_psi(:,:,:), coef(:,:)
+  integer, allocatable :: segment_of(:)
+  integer :: nstab, nseg, kseg, maxseg
   Integer ::  i, j, lc, io, io2, i0, ir, ii, ik, ic, ich, ibarrier, idx
   Integer ::  j1, j2
   Real(8) ::  V, fac, r, r1, r2
@@ -1847,6 +1856,15 @@ Subroutine Numerov_core(P, capture_snapshot)
     Allocate(fundamental(Nlevel,Nlevel,0:R_iterat+1))
     fundamental = (0.d0,0.d0)
   End If
+  nstab = Max(1, Nint(0.5d0/dr))
+  maxseg = R_iterat/nstab + 3
+  Allocate(stab_psi(Nlevelmax,Nlevelmax,maxseg), coef(Nlevelmax,0:maxseg), segment_of(0:R_iterat+1))
+  nseg = 0
+  segment_of = 0
+  eye = (0.d0,0.d0)
+  Do i = 1, Nlevel
+    eye(i,i) = (1.d0,0.d0)
+  End Do
 
   ai = (0.d0, 1.d0)
   fac = dr**2 * (2.d0 * ReduceMass / Hbar**2)
@@ -1919,8 +1937,8 @@ Subroutine Numerov_core(P, capture_snapshot)
   End Do
 
   If (capture_snapshot) Then
-    Call CaptureNumerovFundamental(0,xi0,aa,fundamental)
-    Call CaptureNumerovFundamental(1,xi1,aa,fundamental)
+    Call CaptureNumerovFundamental(0,xi0,eye,fundamental)
+    Call CaptureNumerovFundamental(1,xi1,eye,fundamental)
   End If
 
   !----------------------------------------------  iterations start
@@ -1962,10 +1980,15 @@ Subroutine Numerov_core(P, capture_snapshot)
         End Do
     End Do
 
-    If (capture_snapshot) Call CaptureNumerovFundamental(ir,xi,aa,fundamental)
+    If (capture_snapshot) Call CaptureNumerovFundamental(ir,xi,eye,fundamental)
+    segment_of(ir) = nseg
 
     If(ir == R_iterat+1)Exit
-    If(ir == ibarrier) Call stabilize(xi1,xi,aa,ir)
+    If (ir == ibarrier .Or. Mod(ir, nstab) == 0) Then
+      Call stabilize(xi1, xi, aa, ir, psi_stab)
+      nseg = nseg + 1
+      stab_psi(:, :, nseg) = psi_stab
+    End If
     
 
     Do ich = 1, nlevel
@@ -2077,7 +2100,24 @@ Subroutine Numerov_core(P, capture_snapshot)
       End Do
   End Do
 
-  Call matinv(Nlevel,bb,bin)
+  ! c(last) = bb0^(-1) e_1 in the last segment's basis; c(k-1) = psi_k^(-1) c(k).
+  ! c(0) are the r_min-basis coefficients that the matrix bb (= bb0 aa) gave.
+  tmp = bb0
+  Call matinv(Nlevel, tmp, b0in)
+  coef = (0.d0, 0.d0)
+  coef(1:Nlevel, nseg) = b0in(1:Nlevel, 1)
+  Do kseg = nseg, 1, -1
+    tmp = stab_psi(:, :, kseg)
+    Call matinv(Nlevel, tmp, cin)
+    Do i = 1, Nlevel
+      Do j = 1, Nlevel
+        coef(i, kseg-1) = coef(i, kseg-1) + cin(i, j) * coef(j, kseg)
+      End Do
+    End Do
+  End Do
+  Do i = 1, Nlevel
+    bin(i, 1) = coef(i, 0)
+  End Do
 
   P = 0.d0
 
@@ -2102,7 +2142,7 @@ Subroutine Numerov_core(P, capture_snapshot)
       Do ich=1,Nlevel
         idx=ir*Nlevel+ich
         Do io=1,Nlevel
-          wf(idx)=wf(idx)+fundamental(ich,io,ir)*bin(io,1)
+          wf(idx)=wf(idx)+fundamental(ich,io,ir)*coef(io,segment_of(ir))
         End Do
       End Do
     End Do
@@ -2122,6 +2162,7 @@ Subroutine Numerov_core(P, capture_snapshot)
     Numerov_snapshot_ready=.True.
     Deallocate(fundamental)
   End If
+  Deallocate(stab_psi, coef, segment_of)
 
   Return
 

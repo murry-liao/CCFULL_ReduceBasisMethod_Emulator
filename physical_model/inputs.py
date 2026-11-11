@@ -1,4 +1,4 @@
-"""CCFULL input records and experimental fusion cross-section files."""
+"""CCFULL input records, line-based input files, and experimental fusion cross-section files."""
 
 from __future__ import annotations
 
@@ -8,20 +8,21 @@ from pathlib import Path
 import re
 
 
-def _numbers(line: str) -> list[float]:
+def numbers(line: str) -> list[float]:
+    """The numbers of an input line, separated by commas or blanks."""
     return [float(item) for item in re.split(r"[,\s]+", line.strip()) if item]
 
 
+def data_lines(path: str | Path) -> list[str]:
+    """The lines of an input file that hold data: not blank and not starting with '#'."""
+    lines = (line.strip() for line in Path(path).read_text().splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
+
+
 def parse_input(path: str | Path) -> dict:
-    """The nine CCFULL records of ``path``; comment lines and anything after them are ignored."""
-    lines = [line.strip() for line in Path(path).read_text().splitlines()
-             if line.strip() and not line.lstrip().startswith("#")]
-    if len(lines) < 9:
-        raise ValueError(f"{path}: a CCFULL input needs nine data records")
-    records = [_numbers(line) for line in lines[:9]]
-    if any(len(record) < size for record, size in zip(records, (4, 4, 4, 4, 4, 2, 3, 3, 2))):
-        raise ValueError(f"{path}: a CCFULL record has too few values")
-    reaction, geometry, target1, target2, projectile, transfer, potential, energy, radial = records
+    """The nine CCFULL records at the top of ``path``; the lines after them are ignored."""
+    (reaction, geometry, target1, target2, projectile, transfer, potential, energy,
+     radial) = (numbers(line) for line in data_lines(path)[:9])
     target_mode = int(geometry[3])
     if target_mode == 1:
         # Rotor record E2T,beta2,beta4,beta6,NrotT; the original four-value record has no beta6.
@@ -41,24 +42,8 @@ def parse_input(path: str | Path) -> dict:
     }
 
 
-def _validate(config: dict) -> None:
-    if min(int(config[key]) for key in ("apro", "zpro", "atar", "ztar")) <= 0:
-        raise ValueError("mass and charge numbers must be positive")
-    if int(config["zpro"]) > int(config["apro"]) or int(config["ztar"]) > int(config["atar"]):
-        raise ValueError("a charge number cannot exceed its mass number")
-    if (int(config["projectile_mode"]) not in (-1, 0, 1)
-            or int(config["target_mode"]) not in (-1, 0, 1)):
-        raise ValueError("a coupling mode must be -1 (inert), 0 (vibration), or 1 (rotation)")
-    for key in ("r0p", "r0t", "v0", "r0", "a0", "de", "rmax", "dr"):
-        if float(config[key]) <= 0:
-            raise ValueError(f"{key} must be positive")
-    if float(config["emax"]) < float(config["emin"]):
-        raise ValueError("emax must be at least emin")
-
-
 def input_text(config: dict) -> str:
     """The nine records of ``config`` as CCFULL reads them from ccfull.inp."""
-    _validate(config)
     rows = [
         [int(config["apro"]), int(config["zpro"]), int(config["atar"]), int(config["ztar"])],
         [config["r0p"], int(config["projectile_mode"]), config["r0t"], int(config["target_mode"])],
@@ -74,43 +59,27 @@ def input_text(config: dict) -> str:
 
 
 def records_sha256(path: str | Path) -> str:
-    """SHA-256 of the nine CCFULL records of ``path``; comments and the training section are excluded."""
+    """SHA-256 of the nine CCFULL records of ``path``; comments and the lines after them are excluded."""
     return hashlib.sha256(input_text(parse_input(path)).encode()).hexdigest()
+
+
+def reaction_label(config: dict) -> str:
+    """For example "A=16, Z=8 + A=154, Z=62"."""
+    return f"A={config['apro']}, Z={config['zpro']} + A={config['atar']}, Z={config['ztar']}"
 
 
 def energy_values(config: dict) -> list[float]:
     """Emin, Emin + dE, ... up to Emax (record 8)."""
     first, last, step = map(float, (config["emin"], config["emax"], config["de"]))
-    if step <= 0 or last < first:
-        raise ValueError("the CCFULL energy grid needs dE > 0 and Emax >= Emin")
     count = int(math.floor((last - first) / step + 1e-9))
     return [first + index * step for index in range(count + 1)]
 
 
-_DATA_NAME = re.compile(r"^fusion-exp-(\d+)\.(\d+)\.(\d+)\.(\d+)-[^-]+-\d+-\d+\.txt$")
-
-
-def data_nuclei(path: str | Path) -> tuple[tuple[int, int], tuple[int, int]]:
-    """(Z, A) of both nuclei of an Expdata file, named fusion-exp-Z1.A1.Z2.A2-kind-year-set.txt."""
-    match = _DATA_NAME.match(Path(path).name)
-    if not match:
-        raise ValueError(f"unrecognized Expdata file name: {Path(path).name}")
-    z1, a1, z2, a2 = map(int, match.groups())
-    return (z1, a1), (z2, a2)
-
-
 def load_dataset(path: str | Path) -> list[dict]:
-    """The rows of an Expdata file: E_cm, sigma_fus, and its lower and upper uncertainty."""
+    """The rows of an Expdata file: E_cm, sigma_fus, its lower and upper uncertainty, and E_lab."""
     rows = []
-    for number, line in enumerate(Path(path).read_text().splitlines(), start=1):
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        fields = line.split()
-        if len(fields) != 5:
-            raise ValueError(f"{path}:{number}: expected five columns")
-        energy, cross_section, lower, upper, _ = map(float, fields)     # the fifth is E_lab
+    for line in data_lines(path):
+        energy, cross_section, lower, upper, _ = numbers(line)
         rows.append({"energy_cm_mev": energy, "fusion_cross_section_mb": cross_section,
                      "uncertainty_lower_mb": lower, "uncertainty_upper_mb": upper})
-    if not rows:
-        raise ValueError(f"experimental dataset is empty: {path}")
     return rows
