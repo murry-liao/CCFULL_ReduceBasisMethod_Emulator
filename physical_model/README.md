@@ -1,26 +1,42 @@
 # Physical model
 
-- `solvers/standard_numerov/ccfull.f90` is the high-fidelity model and
-  wave-snapshot source. Trained models record its SHA-256, so editing it
-  requires retraining.
-- Its `Numerov_core` re-stabilizes the propagated solutions every 0.5 fm and
-  rebuilds the wave function segment by segment. With only the original
-  stabilization at the barrier, strongly closed channels (states far up the
-  rotor band, two-phonon states) polluted the snapshot wave functions; the
-  cross sections were already correct and change by less than 1e-6.
-- `solvers/standard_numerov/snapshot_driver.f90` and `library_interface.f90`
-  replace the main program of `ccfull.f90` in its two builds: a program that
-  solves one (θ, E, J) and writes the wave function, and a shared library that
-  stays loaded in Python for coupling potentials, multipole form factors,
-  Coulomb functions, partial-wave counts, and exact penetrabilities.
-- `ccfull.py` compiles both with the gfortran that generates code for the
-  running Python's architecture, reuses a build while its source is
-  unchanged, and calls them. Numerov always propagates in `complex128`; only
-  the exported training snapshots are `complex64`.
-- `inputs.py` reads the nine CCFULL records, the lines of the emulator input
-  files, and the experimental data files.
-- The CCFULL records used for training are the first nine records of
-  `../emulator/emulator_train.in`.
-- `../data/experimental/4-final-ngt4/` is the active experimental library: 410
-  curated fusion datasets covering 369 reaction systems.
-- `build/` is generated and may be recreated from source.
+The exact model of the emulator is the F90 CCFULL program of
+`CCfull_Real_fortran90_numerov/ccfull.f90`, in two versions:
+
+- **`ccfull_clean/`** — the exact model. It differs from the F90 program in
+  three places, each explained in its `Readme.dat`:
+  - the standard Numerov step instead of Hagino's modified one, so that the
+    discrete equations are linear in the potential;
+  - a stabilization every 0.5 fm besides the one at the barrier;
+  - an optional line 10 of `ccfull.inp` that fixes r_min.
+
+  The unused snapshot routines of the original file are removed. It reads
+  `ccfull.inp` and writes `sigma.dat` and `Output.dat`, like the original.
+- **`ccfull_interface/`** — the same program with an output interface. Its
+  `sigma.dat` is byte-identical to that of `ccfull_clean`. Every added line is
+  marked `! interface` (`diff ccfull_clean/ccfull.f90 ccfull_interface/ccfull.f90`).
+  It also writes:
+  - the wave function and P_J of every partial wave it solves
+    (`waves_info.txt`, `waves.bin`);
+  - the coupling matrices on the grid (`coupling.bin`);
+  - the Coulomb functions of its matching (`matching.txt`).
+
+  An optional line 11 of `ccfull.inp` makes it go on solving partial waves
+  after the J sum has ended, up to that J, for their wave functions only.
+
+The emulator (`../emulator`) uses these programs by writing `ccfull.inp`:
+
+- lines 3 and 7: the six parameters;
+- line 8: the energy;
+- line 10: the r_min of its grid;
+- line 11: the last J.
+
+It then reads the output files.
+
+Build each program with `make` in its folder. On Apple silicon, use a
+gfortran that makes arm64 code, for example
+`make FC=/opt/homebrew/bin/gfortran`; check it with `gfortran -dumpmachine`.
+
+The comparison of the standard and modified Numerov steps, and of one
+stabilization against one every 0.5 fm, is in
+`../../Plot/CalData/34S+168Er_numerov/README.md`.

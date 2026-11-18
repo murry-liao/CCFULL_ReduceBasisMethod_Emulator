@@ -1,4 +1,8 @@
-physical_model/build/
+# The two CCFULL programs are built with make; their run outputs stay local.
+physical_model/ccfull_clean/ccfull
+physical_model/ccfull_interface/ccfull
+physical_model/ccfull_*/sigma.dat
+physical_model/ccfull_*/Output.dat
 *.mod
 __pycache__/
 *.pyc

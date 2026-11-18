@@ -10,11 +10,17 @@ target it returns the fusion cross section σ_fus as a function of:
 - the Woods–Saxon depth, radius, and diffuseness V₀, r₀, a₀;
 - the centre-of-mass energy E.
 
-One reduced basis serves every parameter point, energy, and partial wave.
-σ_fus can therefore be evaluated at any energy of the trained range: at the
-measured energies for χ² scans, or on a fine grid for the barrier
-distribution. χ² scans, optimisation, and Bayesian inference then no longer
-need a coupled-channels run for every parameter point.
+Two reduced models are built:
+
+- **Global model.** One reduced basis serves every parameter point, energy,
+  and partial wave, so σ_fus can be evaluated at any energy of the trained
+  range
+- **Local model.** Trained separately from its own CCFULL snapshots, every
+  (E, J) of chosen energies (for example the measured ones) gets its own small
+  basis. It is several times faster.
+
+χ² scans, optimisation, and Bayesian inference then no longer need a
+coupled-channels run for every parameter point.
 
 The emulator reduces the discretised coupled equations themselves rather than
 fitting the cross section:
@@ -25,26 +31,30 @@ fitting the cross section:
 - **Projection.** The Numerov equations are projected onto the basis with the
   Galerkin method.
 - **Coupling potential.** The non-affine coupling potential is made affine in
-  the parameters by a multipole-wise empirical interpolation method (CC-EIM).
+  the parameters by an empirical interpolation method that treats all
+  independent elements of the coupling matrix together.
 
 The cross section follows from the reduced wave solution and the original
 CCFULL definitions.
 
 ## How it works
 
-The numbers below belong to the `16O + 154Sm` example in this repository.
+The numbers below belong to the `34S + 168Er` example in this repository (six
+channels).
 
 ```text
  Offline (once per training box)                Online (per parameter point θ)
  ---------------------------------              ---------------------------------
  1. exact Numerov snapshots: 4000 points        1. potential at the EIM nodes only
-    of a Latin hypercube in                        (72 radial points)
-    (β2, β4, β6, V0, r0, a0, E, J)              2. EIM coefficients (120 numbers)
+    of a Latin hypercube in                        (31 radial points)
+    (β2, β4, β6, V0, r0, a0, E, J)              2. EIM coefficients (40 numbers)
  2. one POD basis for all snapshots, rank 300   3. for every energy E and partial
- 3. multipole CC-EIM of the coupling field         wave J: assemble the 300x300
-    13 multipoles, 120 modes                       reduced matrix, solve -> P_J
- 4. Galerkin projection of all operators        4. sigma_fus = (pi hbar^2 / 2 mu E)
-                                                      * sum_J (2J+1) P_J
+ 3. joint CC-EIM of the coupling field:            wave J: assemble the reduced
+    21 matrix elements, 40 modes                   matrix (300x300 global, 80x80
+ 4. Galerkin projection of all operators           local), solve -> P_J
+ 5. local model (optional, separate): for       4. sigma_fus = (pi hbar^2 / 2 mu E)
+    every (E, J) of the measured energies, a          * sum_J (2J+1) P_J
+    rank-80 POD basis of 300 exact snapshots
 ```
 
 The reduced operator of the block (E, J) is
@@ -58,15 +68,21 @@ A(θ, E, J) = P_d2 − t [P_coul − E·P_one + (ħ²/2μ) J(J+1) P_cent]
 - E and J(J+1) enter linearly, so every operator is projected offline.
 - Online, only the two boundary rows are built for each (θ, E, J). The outer
   Coulomb map depends on (E, J) only and is cached per energy.
+- The local model projects the same equations of one (E, J) onto the basis of
+  that block, so E and J are fixed offline and only the CC-EIM sum and the
+  inner boundary rows remain to be built online.
+
 
 ## Installation
 
 **Requirements**
 
 - Python ≥ 3.11, NumPy ≥ 2.0, SciPy ≥ 1.13
-- `gfortran` and BLAS/LAPACK that link as `-lblas -llapack`. The Fortran solver
-  is compiled automatically on first use into `physical_model/build/`.
-- macOS or Linux (POSIX file locking is used by the build step).
+- `gfortran`, to build the two CCFULL programs: run `make` in
+  `physical_model/ccfull_clean` and in `physical_model/ccfull_interface`. On
+  Apple silicon use a gfortran that makes arm64 code, e.g.
+  `make FC=/opt/homebrew/bin/gfortran`.
+- emcee and pandas for the calibration (`emulator/mcmc.py`).
 
 Developed and tested on macOS 13 (Apple silicon) with Python 3.12 and GNU
 Fortran 15.1. Linux should work but has not been tested.
@@ -85,26 +101,17 @@ Run all commands from the repository root. The repository ships without trained
 models, so the first step is training.
 
 ```bash
-python -m emulator.train --check       # print how each line of emulator/emulator_train.in is read
-python -u -m emulator.train            # stage 1 (snapshots, basis), then stage 2 (CC-EIM, projection)
+make -C physical_model/ccfull_clean       # the exact model (add FC=... on Apple silicon)
+make -C physical_model/ccfull_interface   # the same program, which also writes the wave functions
 
-python -m emulator.run_rom --check     # print how each line of emulator/emulator_rom.in is read
-python -m emulator.run_rom             # emulate and check against exact CCFULL; results in emulator/outputs/
-```
+python -m emulator.train_local --check    # print how each line of emulator/emulator_train.in is read
+python -u -m emulator.train_local         # the local model
+python -u -m emulator.train_global        # the global model
 
-Both input files are written like a CCFULL input: one item, or a few
-comma-separated numbers, per line, with every line explained at the end of the
-file. See [`emulator/README.md`](emulator/README.md).
+python -m emulator.run_rom --check        # print how each line of emulator/emulator_rom.in is read
+python -m emulator.run_rom                # emulate and check against exact CCFULL; results in emulator/outputs/
 
-**Analysis notebook.** `emulator/parameter_analysis.ipynb` reads a run
-directory from `emulator/outputs/`. It finds the best parameter point by χ²
-against experiment, and plots the excitation function and the barrier
-distribution D(E) = d²(Eσ)/dE² at that point. Set `RUN` at the top of the
-notebook to your run.
-
-```bash
-python -m pip install -e ".[notebook]"
-python -m jupyter lab emulator/parameter_analysis.ipynb
+python -m emulator.mcmc --config emulator/emulator_mcmc_34S_168Er.in    # Bayesian calibration
 ```
 
 ## Repository layout
@@ -112,20 +119,20 @@ python -m jupyter lab emulator/parameter_analysis.ipynb
 ```text
 .
 ├── emulator/
-│   ├── train.py                     reads emulator_train.in; snapshots, POD, CC-EIM, projection
+│   ├── train_local.py               reads emulator_train.in; the local model
+│   ├── train_global.py              reads emulator_train.in; the global model
 │   ├── run_rom.py                   reads emulator_rom.in; predictions and the accuracy check
-│   ├── emulator_train.in            training input: CCFULL records + training lines, explained at the end
-│   ├── emulator_rom.in              prediction input, explained at the end
-│   ├── rom.py                       Galerkin projection, the online solve, trained-model manifests
-│   ├── eim.py                       multipole CC-EIM of the coupling field
+│   ├── mcmc.py                      reads emulator_mcmc_*.in; Bayesian calibration
+│   ├── ccfull_run.py                writes ccfull.inp, runs CCFULL, reads its output and the data files
+│   ├── coupling.py                  CCFULL's coupling matrix in Python (rotational target)
+│   ├── rom.py                       the reduced model, and the CC-EIM fit and projection of the training
+│   ├── emulator_*.in                inputs, each explained at its end
 │   ├── parameter_analysis.ipynb     best parameters, excitation function, barrier distribution
 │   ├── training_data/               generated models (not tracked)
 │   └── outputs/                     generated query results (not tracked)
 ├── physical_model/
-│   ├── ccfull.py                    compiles and calls CCFULL
-│   ├── inputs.py                    CCFULL records, line-based inputs, experimental data files
-│   ├── solvers/standard_numerov/    Fortran 90 CCFULL with standard Numerov, and its two drivers
-│   └── build/                       generated binaries (not tracked)
+│   ├── ccfull_clean/                the exact model: F90 CCFULL, standard Numerov (see its Readme.dat)
+│   └── ccfull_interface/            the same program with an output interface for the emulator
 ├── data/
 │   ├── experimental/                measured fusion excitation functions
 │   └── input_templates/             example batch-query table

@@ -1,0 +1,28 @@
+这是干净版 ccfull_clean 加上输出接口。数值完全相同，sigma.dat 逐字节相同。
+
+全部差别可以用 diff ../ccfull_clean/ccfull.f90 ccfull.f90 看到，带 "! interface" 的行就是：
+  - Numerov 子程序里：用 Keep_Wave_Step 保存每一步的解；解完后调用 Write_Waves；
+  - 文件末尾的两个子程序：Keep_Wave_Step 和 Write_Waves；
+  - 可选的第 11 行：J 求和结束（sigma 算完）以后，再把分波一直解到第 11 行给的 J，
+    只为了写出它们的波函数，不进 sigma。这样 emulator 的每个训练点都有同一套分波：
+    CCFULL 自己在 sigma 收敛时就停，各点停在不同的 J 上。没有第 11 行时和干净版完全一样。
+
+除了 sigma.dat 和 Output.dat，它还写四个文件：
+
+  waves_info.txt  先写网格：道数、格点数、r_min (fm)、dr (fm)、约化质量 (MeV)、Zp、Zt。
+                  然后每个算过的分波一行：E (MeV)、J、P_J，以及由 r_min 处波函数的通量
+                  算出的 P_J（用来检验）。
+  waves.bin       每一行对应的波函数 u(道, r)，complex(8)。逐个半径写，每个半径里逐个道写。
+                  归一化为入射道里有一个入射波。
+  coupling.bin    网格上的耦合矩阵 CPOT(道, 道, r) 和 CPOTH，real(8)。每次运行写一次。
+  matching.txt    CCFULL 在 r_max - dr 和 r_max + dr 处和库仑波匹配时用的量：每个分波的每个道一行，
+                  写 E、J、道、这两个半径处的道能量、F 和 G（闭道写 0）。
+                  emulator 用它构造 ROM 的外边界条件；Python 里算这些库仑函数太慢。
+
+emulator 取快照时只改 ccfull.inp：
+  第 3 行 beta2, beta4, beta6；第 7 行 V0, r0, a0；第 8 行能量；第 10 行固定的 r_min；
+  第 11 行要写出的最大 J。
+然后运行这个程序，读上面三个文件。
+
+编译：make
+      Apple 芯片上用：make FC=/opt/homebrew/bin/gfortran

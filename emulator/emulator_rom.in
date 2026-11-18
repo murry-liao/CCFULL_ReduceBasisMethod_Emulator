@@ -1,30 +1,32 @@
-16O_154Sm_Basis_300
+34S_168Er_Local_Channel6_Snap300_POD80_EIM40
 emulator/training_data
-1
+48
 latin_hypercube
-0.322,0.050,0.000,165.0,0.950,1.050
+0.3453,-0.0258,0.0293,394.37,0.7948,1.3674
 100,20261110
 data/input_templates/rom_parameter_points.csv
 training
-0.300,0.360, 0.015,0.095, 0.0,0.0
-165.0,185.0, 0.900,0.980, 1.00,1.10
+0.315,0.376, -0.042,-0.010, 0.019,0.040
+372.875,412.125, 0.760,0.840, 1.2825,1.4175
 experimental
-52.0,100.0,0.5
-60.0,70.0,80.0
+111.0,163.0,0.5
+120.34,130.32,139.48
 1,1,1
 emulator/outputs
 1,1,1
 -------------------------------------------------------------------------------
-CCFULL-ROM prediction input.  The lines are read in order; blank lines and
-lines starting with # are skipped, and everything after line 16 is ignored.
-Paths are relative to the project root.  The trained parameter box, energy
-range, and experimental data come from the manifest of the model.
+CCFULL-ROM prediction input (python -m emulator.run_rom).  The lines are read
+in order; blank lines and lines starting with # are skipped, and nothing after
+the dashed line is read.  Paths are relative to the project root.  The trained
+parameter box, energy range, and experimental data come from the model.
 
- 1   model_id of the trained model (line 10 of emulator_train.in).
- 2   training_root it was trained into (line 12 of emulator_train.in).
- 3   worker processes; each loads its own copy of the model and of CCFULL.
- 4   prediction mode: single (line 5), latin_hypercube (line 6), or table
-     (line 7).
+ 1   name of the trained model, global or local, e.g.
+     34S_168Er_Local_Channel6_Snap300_POD80_EIM40.
+ 2   folder of the trained models (line 12 of emulator_train.in).
+ 3   basis rank: 0 uses the trained rank.  A smaller rank keeps the leading
+     POD vectors and gives the same result as a training at that rank.  For a
+     local model it is the rank per (E, J).
+ 4   points: single (line 5), latin_hypercube (line 6), or table (line 7).
  5   single point: beta2,beta4,beta6,V0,r0,a0.  It may lie outside the box.
  6   Latin hypercube: number of points, seed.
  7   table of points: a CSV file with a header line and the columns
@@ -34,12 +36,13 @@ range, and experimental data come from the manifest of the model.
  9   custom bounds of beta2, beta4, beta6, as line 13 of emulator_train.in.
  10  custom bounds of V0, r0, a0, as line 14 of emulator_train.in.
  11  energies: experimental (the measured energies of the model's data), grid
-     (line 12), or selected (line 13).  They must lie in the trained range.
+     (line 12), or selected (line 13).  They must lie in the trained range;
+     a local model emulates only the energies it was built for.
  12  energy grid: first, last, step in MeV.
  13  selected energies in MeV; keep a value here even when it is not used.
- 14  1 = yes, 0 = no: show the measured cross sections; check against exact
-     Numerov CCFULL at the same points and energies; report exact time / ROM
-     time (needs the check).
+ 14  1 = yes, 0 = no: show the measured cross sections; check against the
+     exact CCFULL program (physical_model/ccfull_clean) at the same points and
+     energies; report exact time / ROM time (needs the check).
  15  output directory; every run writes a new timestamped directory in it.
  16  1 = yes, 0 = no: write cross_sections.csv, run_summary.json, and
      point_timings.csv (ROM and exact time of every point).

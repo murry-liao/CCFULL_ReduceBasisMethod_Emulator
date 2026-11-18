@@ -1,41 +1,68 @@
-16,8,154,62
+34,16,168,68
 1.2,-1,1.06,1
-0.082,0.322,0.05,0.00,6
-1.66,0.11,2,0
-6.13,0.733,3,1
-0,0.,0.3
-165,0.95,1.05
-50.,75.,1
-30,0.05
-16O_154Sm_Basis_300
-data/experimental/4-final-ngt4/fusion-exp-8.16.62.154-tb-1995-611.txt
+0.0798,0.3453,-0.0258,0.0293,5
+0,0,0,0
+0,0,0,0
+0,0.0
+394.37,0.7948,1.3674
+105.0,140.0,1.11
+30.0,0.05
+34S_168Er
+data/experimental/4-final-ngt4/fusion-exp-16.34.68.168-tb-2000-1128.txt
 emulator/training_data
-0.300,0.360, 0.015,0.095, 0.0,0.0
-165.0,185.0, 0.900,0.980, 1.00,1.10
+0.315,0.376, -0.042,-0.010, 0.019,0.040
+372.875,412.125, 0.760,0.840, 1.2825,1.4175
 experimental
-4000,300,20261103,1
-200,20261101,1.0e-5,20
+4000,300,20261103
+200,20261101,40
+experimental
+80,300,20261120
 -------------------------------------------------------------------------------
-CCFULL-ROM training input.  The lines are read in order; blank lines and lines
-starting with # are skipped, and everything after line 17 is ignored.  Paths
+CCFULL-ROM training input (python -m emulator.train_global, python -m
+emulator.train_local).  The lines are read in order; blank lines and lines
+starting with # are skipped, and nothing after the dashed line is read.  Paths
 are relative to the project root.
 
- 1-9  CCFULL input of the reaction (CCFULL manual).  Line 3 is the rotor
-      record E2T,beta2,beta4,beta6,NrotT.
- 10   model_id: name of the trained model and of its directories in
-      training_data and outputs.  auto: aAP_zZP__aAT_zZT, e.g. a16_z8__a154_z62.
+ 1-9  CCFULL input of the reaction (ccfull.inp of physical_model/ccfull_clean).
+      Line 3 is the rotor record E2T,beta2,beta4,beta6,NrotT, and its six
+      parameters with those of line 7 are the nominal point.  CCFULL at the
+      nominal point puts r_min at the bottom of its pocket; the training keeps
+      this r_min for every parameter point (line 10 of ccfull.inp), so that all
+      snapshots share one radial grid.
+ 10   system name, the first part of both model names.  The rest of each name
+      is written from the settings:
+        global: <system>_Global_Channel<channels>_Snap<snapshots>_POD<rank>_EIM<modes>
+        local:  <system>_Local_Channel<channels>_Snap<snapshots>_POD<rank>_EIM<modes>
+      with the snapshots and rank of line 16 (global) or 19 (local, per (E, J)),
+      and the CC-EIM modes of line 17, e.g.
+      34S_168Er_Local_Channel6_Snap300_POD80_EIM40.  The channels are NrotT + 1
+      of line 3.  Each model is written to training_root/<name>; a training
+      stops if that folder exists.
  11   experimental data file of this reaction.
- 12   training_root: directory of the trained models.
+ 12   training_root: folder of the trained models.
  13   bounds of beta2, beta4, beta6: lower,upper of each.  Equal bounds fix
       a parameter, e.g. 0.0,0.0 for beta6.
  14   bounds of V0 (MeV), r0 (fm), a0 (fm), as line 13.
- 15   energy range of the model; any energy inside it can be emulated.
+ 15   energy range of the global model; any energy inside it can be emulated.
       experimental: the measured energies of line 11, rounded outward to MeV.
       ccfull: Emin and Emax of line 8.  Or lower,upper in MeV, e.g. 52.0,100.0.
- 16   snapshots, basis rank, seed, CCFULL processes at a time.  The snapshots
-      are Latin-hypercube points in (beta2, beta4, beta6, V0, r0, a0, E, J),
-      one exact CCFULL solve each; J is drawn from the partial waves CCFULL
-      needs at that energy.  The basis keeps that many POD modes of them, and
-      each online (E, J) solve is a rank x rank system.
+ 16   global model: snapshots, basis rank, seed.  The snapshots are
+      Latin-hypercube points in (beta2, beta4, beta6, V0, r0, a0, E, u): one run
+      of the interface program each, of which the partial wave J is taken by u
+      among those CCFULL solved.  The basis keeps that many POD modes of them,
+      and each online (E, J) solve is a rank x rank system.
  17   CC-EIM of the coupling field: parameter points (potential evaluations
-      only), seed, tolerance, maximum modes per multipole.
+      only), seed, number of modes.  All independent elements of the coupling
+      matrix are interpolated together and the leading POD modes are kept.
+      The training prints the interpolation error at new parameter points, so
+      the number of modes can be chosen from it.
+ 18   energies of the local model: none, experimental (the measured energies of
+      line 11), or first,last,step in MeV.  The local model is trained
+      separately from the global model: one small basis per (E, J) from its own
+      runs of the interface program, and its own CC-EIM with the settings of
+      line 17.  It is several times faster than the global model but emulates
+      only these energies.
+ 19   local model: basis vectors per (E, J), Latin-hypercube points, seed.
+      Every energy is solved at the same points and at the corners of the box;
+      the block of a partial wave uses the runs in which CCFULL solved it, so the
+      highest partial waves have fewer snapshots and a smaller basis.

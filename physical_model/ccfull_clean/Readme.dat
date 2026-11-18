@@ -1,0 +1,25 @@
+这是 emulator 的精确模型：干净版，不带输出接口。
+
+来源是 CCfull_Real_fortran90_numerov/ccfull.f90（F90 版 CCFULL）。和它相比只有三处改动：
+
+1. Numerov 那一步改用标准写法：
+       xi(n+1) = [12 (1 - T)^(-1) - 10] xi(n) - xi(n-1),   T = dr^2 (2mu/hbar^2)(V - E)/12
+   原程序用的是 Hagino 的修正写法 [2 + 12T + 12T^2]，相当于把 (1 - T)^(-1) 截断到 T^2。
+   标准写法对势是线性的，emulator 才能把方程投影到小基上。
+   两种写法的 sigma 相差很小（34S+168Er 的中位数约 1e-4），
+   见 Plot/CalData/34S+168Er_numerov/README.md。
+
+2. 除了在势垒处，每 0.5 fm 再稳定化一次。
+   只稳定化一次时，某些能量下最高的几个分波会算错：34S+168Er 在 144 MeV 附近，
+   J = 75-78 的 P_J 出错，sigma 差 6e-3。每 0.5 fm 和每 0.1 fm 的结果一致到 1e-9。
+
+3. ccfull.inp 可以有第 10 行：固定的 r_min（fm）。
+   有这一行时，入射波边界条件放在这个半径；没有这一行时，和原程序一样放在口袋底。
+   emulator 用它让所有参数点都在同一套网格上。
+
+另外，原文件里有一套从没被调用的快照子程序，这里删掉了。
+
+编译：make
+      Apple 芯片上要用产生 arm64 代码的 gfortran：make FC=/opt/homebrew/bin/gfortran
+运行：./ccfull
+      读 ccfull.inp，写 sigma.dat 和 Output.dat，和原程序一样。

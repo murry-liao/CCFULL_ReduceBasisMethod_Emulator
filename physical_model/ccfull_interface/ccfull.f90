@@ -7,6 +7,13 @@
 !
 !gfortran ./ccfull.f90
 !'''
+!
+! This copy (CCFULL_ROM/physical_model/ccfull_interface) is ccfull_clean with one output
+! routine, Write_Waves, and the step store it needs, Keep_Wave_Step.  ccfull_clean
+! differs from the F90 program in
+! CCfull_Real_fortran90_numerov in three places; see Readme.dat:
+!   the standard Numerov step, a stabilization every 0.5 fm, and an optional line 10
+!   of ccfull.inp that fixes r_min.
 
 
 Module ccfull_initialization_mod
@@ -81,15 +88,12 @@ Module ccfull_initialization_mod
   Real(8), Allocatable, Public :: betnahvp(:,:), betcahvp(:,:), bett(:,:), betp(:,:)
   Real(8), Allocatable, Public :: Evec(:,:), CPOT0(:,:), CPOTH(:,:), CPOT(:,:,:)
   Real(8), Allocatable, Public :: H(:,:), unit(:,:)
-  ! Snapshot interface for the reduced-basis emulator.  The flattened vector
-  ! uses the DBM ordering idx = radial_index*Nlevel + channel, with radial
-  ! indices 0:R_iterat+1.  Its first Nx_cc entries are the DBM interior vector.
-  Complex(8), Allocatable, Public :: wf(:)
-  Real(8), Allocatable, Public :: Numerov_radius(:)
-  Real(8), Allocatable, Public :: Echannel(:)
-  Real(8), Public :: Numerov_snapshot_penetrability = 0.d0
-  Real(8), Public :: Numerov_snapshot_consistency = 0.d0
-  Logical, Public :: Numerov_snapshot_ready = .False.
+  ! Optional line 10 of ccfull.inp: a fixed r_min (fm) for the incoming-wave boundary
+  ! condition.  Without it r_min is the bottom of the pocket, as in the original program.
+  Real(8), Public :: R_min_fixed = 0.d0
+  ! interface: optional line 11 of ccfull.inp, the highest J whose wave function is written.
+  ! The partial waves after the end of the J sum are solved up to it for the output only.
+  Integer, Public :: J_last_written = -1
 
   Integer, Allocatable, Public :: imutual(:,:)
   character(len=2), dimension(0:109) :: Element
@@ -166,6 +170,10 @@ Contains
     Read(10,*)V0, R0, A0
     Read(10,*)Emin, Emax, dE
     Read(10,*)R_max, dr
+    Read(10,*,Iostat=input_status) R_min_fixed
+    If (input_status /= 0) R_min_fixed = 0.d0
+    Read(10,*,Iostat=input_status) J_last_written                              ! interface
+    If (input_status /= 0) J_last_written = -1                                 ! interface
   End Subroutine Read_Input
 
   Subroutine Output_information()
@@ -179,6 +187,7 @@ Contains
 
       print '(A, F8.4, A, F8.4, A, F8.3, A, F8.3, A)', &
             "Simulation range R from ", R_min, " fm To ", R_max, " fm, dR = ", dr, " fm"
+      If (R_min_fixed > 0.d0) print '(A)', "r_min is fixed by line 10 of ccfull.inp"
 
       print '(A, F8.3, A, F8.3, A, F8.3, A, F8.3, A)', &
             "Potential parameters: V0= ", V0, "(MeV), a= ", A0, "(fm), r0= ", R0, "(fm), R= ",&
@@ -201,6 +210,7 @@ Contains
 
       write(30,'(A, F8.4, A, F8.4, A, F8.3, A, F8.3, A)') &
             "Simulation range R from ", R_min, " fm To ", R_max, " fm, dR = ", dr, " fm"
+      If (R_min_fixed > 0.d0) write(30,'(A)') "r_min is fixed by line 10 of ccfull.inp"
 
       write(30,'(A, F8.3, A, F8.3, A, F8.3, A, F8.3, A)') &
             "Potential parameters: V0= ", V0, "(MeV), a= ", A0, "(fm), r0= ", R0, "(fm), R= ",&
@@ -337,15 +347,15 @@ Contains
     Call Read_Input()
 
     Call PotShape(0, R_barrier, V_barrier, curv, R_bottom, V_bottom)
-    R_iterat = int((R_max - R_bottom) / dr)
     R_min = R_bottom
-    R_max = R_bottom + dr * R_iterat
+    If (R_min_fixed > 0.d0) R_min = R_min_fixed
+    R_iterat = int((R_max - R_min) / dr)
+    R_max = R_min + dr * R_iterat
     t = Hbar**2 / (2 * ReduceMass * dr**2)
     
     Allocate(CPOT(Nlevelmax,Nlevelmax,0:R_iterat+2))
     Allocate(CPOT0(Nlevelmax,Nlevelmax))
     Allocate(CPOTH(Nlevelmax,Nlevelmax))
-    Allocate(Echannel(Nlevelmax))
 
     Call Output_information()
 
@@ -1815,11 +1825,10 @@ Subroutine stabilize(xi1, xi, aa, ir1, psi_out)
   Return
 End Subroutine stabilize
 
-Subroutine Numerov_core(P, capture_snapshot)
+Subroutine Numerov(P)
   Use ccfull_initialization_mod
   Implicit None
   real(8), intent(out) :: P
-  logical, intent(in) :: capture_snapshot
   complex*16, dimension(Nlevelmax) :: psi, psi0, psi1
   complex*16, dimension(Nlevelmax, Nlevelmax) :: xi, xi0, xi1
   complex*16, dimension(Nlevelmax) :: phi0
@@ -1838,33 +1847,26 @@ Subroutine Numerov_core(P, capture_snapshot)
   complex*16 :: dummy, dummy2
   complex*16, dimension(Nlevelmax, Nlevelmax) :: xi1d, xi0d
   complex*16, dimension(Nlevelmax, Nlevelmax) :: aa, bb0, bb20
-  complex*16, allocatable :: fundamental(:,:,:)
-  ! Stabilization every 0.5 fm keeps the propagated solutions independent; the
-  ! wave function is rebuilt segment by segment, never in the r_min basis.
-  complex*16, dimension(Nlevelmax, Nlevelmax) :: eye, psi_stab, b0in, tmp
+  ! Stabilization at the barrier and every 0.5 fm keeps the propagated solutions
+  ! independent.  With the barrier alone, the highest partial waves lose it near
+  ! some energies.
+  complex*16, dimension(Nlevelmax, Nlevelmax) :: psi_stab, b0in, tmp
   complex*16, allocatable :: stab_psi(:,:,:), coef(:,:)
-  integer, allocatable :: segment_of(:)
+  complex*16, allocatable :: fundamental(:,:,:)          ! interface: solutions at every radius
+  integer, allocatable :: segment_of(:)                  ! interface: stabilization segment of each radius
   integer :: nstab, nseg, kseg, maxseg
-  Integer ::  i, j, lc, io, io2, i0, ir, ii, ik, ic, ich, ibarrier, idx
+  Integer ::  i, j, lc, io, io2, i0, ir, ii, ik, ic, ich, ibarrier
   Integer ::  j1, j2
   Real(8) ::  V, fac, r, r1, r2
   Real(8) ::  ak, ec, eta, rho
   external V
 
-  If (capture_snapshot) Then
-    Numerov_snapshot_ready = .False.
-    Allocate(fundamental(Nlevel,Nlevel,0:R_iterat+1))
-    fundamental = (0.d0,0.d0)
-  End If
   nstab = Max(1, Nint(0.5d0/dr))
   maxseg = R_iterat/nstab + 3
-  Allocate(stab_psi(Nlevelmax,Nlevelmax,maxseg), coef(Nlevelmax,0:maxseg), segment_of(0:R_iterat+1))
+  Allocate(stab_psi(Nlevelmax,Nlevelmax,maxseg), coef(Nlevelmax,0:maxseg))
   nseg = 0
-  segment_of = 0
-  eye = (0.d0,0.d0)
-  Do i = 1, Nlevel
-    eye(i,i) = (1.d0,0.d0)
-  End Do
+  Allocate(fundamental(Nlevel,Nlevel,0:R_iterat+1), segment_of(0:R_iterat+1))   ! interface
+  segment_of = 0                                                                ! interface
 
   ai = (0.d0, 1.d0)
   fac = dr**2 * (2.d0 * ReduceMass / Hbar**2)
@@ -1907,7 +1909,6 @@ Subroutine Numerov_core(P, capture_snapshot)
         Do io2 = 1, Nlevel
             ech(io2) = E - V(R_min, L_i) - CPOT(io2, io2, 0)
             ech2(io2) = E - CPOT(io2, io2, R_iterat)
-            Echannel(io2) = ech(io2)
 
         End Do
     End If
@@ -1936,10 +1937,8 @@ Subroutine Numerov_core(P, capture_snapshot)
     end do
   End Do
 
-  If (capture_snapshot) Then
-    Call CaptureNumerovFundamental(0,xi0,eye,fundamental)
-    Call CaptureNumerovFundamental(1,xi1,eye,fundamental)
-  End If
+  Call Keep_Wave_Step(0, xi0, fundamental)                                      ! interface
+  Call Keep_Wave_Step(1, xi1, fundamental)                                      ! interface
 
   !----------------------------------------------  iterations start
   Do ir = 2, R_iterat + 1
@@ -1947,11 +1946,10 @@ Subroutine Numerov_core(P, capture_snapshot)
     !r0 = R_min + dr * (ir - 2)
     r1 = R_min + dr * (ir - 1)
 
-    ! Standard Numerov in the xi = (1 - T) u representation, T = dr**2 Q / 12:
+    ! Standard Numerov step in the xi = (1 - T) u representation, T = dr**2 Q / 12:
     !   xi(n+1) = [12 (1 - T(n))**(-1) - 10] xi(n) - xi(n-1).
-    ! This is the stencil reduced by the CCFULL-CC-ROM emulator.  Hagino's
-    ! modified Numerov used (sqrt(3) + dr**2 Q / sqrt(12))**2 - 1, which
-    ! truncates (1 - T)**(-1) after second order in T.
+    ! The original program used the modified step (sqrt(3) + dr**2 Q / sqrt(12))**2 - 1,
+    ! which truncates (1 - T)**(-1) after T**2.  The standard step is linear in the potential.
     Do i0 = 1, Nlevel
         Do ic = 1, Nlevel
             dd0(i0, ic) = -fac / 12.d0 * CPOT(i0, ic, ir - 1)
@@ -1980,8 +1978,9 @@ Subroutine Numerov_core(P, capture_snapshot)
         End Do
     End Do
 
-    If (capture_snapshot) Call CaptureNumerovFundamental(ir,xi,eye,fundamental)
-    segment_of(ir) = nseg
+
+    Call Keep_Wave_Step(ir, xi, fundamental)                                    ! interface
+    segment_of(ir) = nseg                                                       ! interface
 
     If(ir == R_iterat+1)Exit
     If (ir == ibarrier .Or. Mod(ir, nstab) == 0) Then
@@ -2129,124 +2128,135 @@ Subroutine Numerov_core(P, capture_snapshot)
   End Do
 
 
-  ! Reconstruct the physical entrance-channel scattering solution.  The
-  ! fundamental matrices were stored in the original inner-boundary basis;
-  ! bin(:,1) normalizes them to one incoming wave in the entrance channel.
-  If (capture_snapshot) Then
-    If (Allocated(wf)) Deallocate(wf)
-    If (Allocated(Numerov_radius)) Deallocate(Numerov_radius)
-    Allocate(wf(Nx2),Numerov_radius(0:R_iterat+1))
-    wf = (0.d0,0.d0)
-    Do ir=0,R_iterat+1
-      Numerov_radius(ir)=R_min+dr*ir
-      Do ich=1,Nlevel
-        idx=ir*Nlevel+ich
-        Do io=1,Nlevel
-          wf(idx)=wf(idx)+fundamental(ich,io,ir)*coef(io,segment_of(ir))
-        End Do
-      End Do
-    End Do
-
-    ! At the IWBC radius, an open-channel basis wave has unit modulus.  This
-    ! gives a direct, independent check that the exported snapshot retains P.
-    Numerov_snapshot_penetrability=0.d0
-    kk=sqrt(2.d0*ReduceMass/Hbar**2*E)
-    Do ich=1,Nlevel
-      If (ech(ich) > 0.d0) Then
-        k=sqrt(2.d0*ReduceMass/Hbar**2*ech(ich))
-        Numerov_snapshot_penetrability=Numerov_snapshot_penetrability+ &
-          abs(wf(ich))**2*k/kk
-      End If
-    End Do
-    Numerov_snapshot_consistency=abs(Numerov_snapshot_penetrability-P)
-    Numerov_snapshot_ready=.True.
-    Deallocate(fundamental)
-  End If
-  Deallocate(stab_psi, coef, segment_of)
+  Call Write_Waves(P, fundamental, coef, segment_of, maxseg)                     ! interface
+  Deallocate(fundamental, segment_of)                                           ! interface
+  Deallocate(stab_psi, coef)
 
   Return
 
-End Subroutine Numerov_core
-
-
-Subroutine CaptureNumerovFundamental(ir,xi_modified,aa,fundamental)
-  Use ccfull_initialization_mod
-  Implicit None
-  Integer, Intent(In) :: ir
-  Complex(8), Intent(In) :: xi_modified(Nlevelmax,Nlevelmax)
-  Complex(8), Intent(In) :: aa(Nlevelmax,Nlevelmax)
-  Complex(8), Intent(Inout) :: fundamental(Nlevel,Nlevel,0:R_iterat+1)
-  Complex(8) :: cc(Nlevelmax,Nlevelmax),cin(Nlevelmax,Nlevelmax)
-  Complex(8) :: transformed(Nlevelmax,Nlevelmax)
-  Integer :: i,j,k
-  Real(8) :: fac,r,V
-  External V
-
-  fac=dr**2*(2.d0*ReduceMass/Hbar**2)
-  r=R_min+dr*ir
-  cc=(0.d0,0.d0)
-  transformed=(0.d0,0.d0)
-  Do i=1,Nlevel
-    Do j=1,Nlevel
-      cc(i,j)=-fac/12.d0*CPOT(i,j,ir)
-      If (i == j) cc(i,j)=cc(i,j)-fac/12.d0*(V(r,L_i)-E)+1.d0
-      Do k=1,Nlevel
-        transformed(i,j)=transformed(i,j)+xi_modified(i,k)*aa(k,j)
-      End Do
-    End Do
-  End Do
-  Call matinv(Nlevel,cc,cin)
-  Do i=1,Nlevel
-    Do j=1,Nlevel
-      fundamental(i,j,ir)=(0.d0,0.d0)
-      Do k=1,Nlevel
-        fundamental(i,j,ir)=fundamental(i,j,ir)+cin(i,k)*transformed(k,j)
-      End Do
-    End Do
-  End Do
-End Subroutine CaptureNumerovFundamental
-
-
-Subroutine Numerov(P)
-  Implicit None
-  Real(8), Intent(Out) :: P
-  Call Numerov_core(P,.False.)
 End Subroutine Numerov
 
 
-Subroutine NumerovSnapshot(P)
-  Implicit None
-  Real(8), Intent(Out) :: P
-  Call Numerov_core(P,.True.)
-End Subroutine NumerovSnapshot
-
-
-Subroutine WriteNumerovSnapshot(filename)
+!==================================================================== interface
+Subroutine Keep_Wave_Step(ir, xi, fundamental)
+  ! u = (1 - T)**(-1) xi of the Nlevel solutions at radius index ir.
   Use ccfull_initialization_mod
   Implicit None
-  Character(Len=*), Intent(In) :: filename
-  Integer :: unit_number,ir,ich,idx
-  If (.Not. Numerov_snapshot_ready) Error Stop 'Numerov snapshot is not ready'
-  Open(Newunit=unit_number,File=filename,Status='Replace',Action='Write')
-  Write(unit_number,'(A)') '# ccfull_numerov_snapshot_v1'
-  Write(unit_number,'(A,I0)') '# nlevel=',Nlevel
-  Write(unit_number,'(A,I0)') '# radial_points=',R_iterat+2
-  Write(unit_number,'(A,I0)') '# nx_cc=',Nx_cc
-  Write(unit_number,'(A,I0)') '# nx2=',Nx2
-  Write(unit_number,'(A,ES24.16)') '# energy_MeV=',Real(E,8)
-  Write(unit_number,'(A,I0)') '# angular_momentum=',L_i
-  Write(unit_number,'(A,ES24.16)') '# penetrability=',Numerov_snapshot_penetrability
-  Write(unit_number,'(A,ES24.16)') '# consistency_abs=',Numerov_snapshot_consistency
-  Write(unit_number,'(A)') 'radial_index,r_fm,channel,real,imag'
-  Do ir=0,R_iterat+1
-    Do ich=1,Nlevel
-      idx=ir*Nlevel+ich
-      Write(unit_number,'(I0,",",ES24.16,",",I0,",",ES24.16,",",ES24.16)') &
-        ir,Numerov_radius(ir),ich,Real(wf(idx)),Aimag(wf(idx))
+  Integer, Intent(In) :: ir
+  Complex(8), Intent(In) :: xi(Nlevelmax,Nlevelmax)
+  Complex(8), Intent(Inout) :: fundamental(Nlevel,Nlevel,0:R_iterat+1)
+  Complex(8) :: cc(Nlevelmax,Nlevelmax), cin(Nlevelmax,Nlevelmax)
+  Integer :: i, j, k
+  Real(8) :: fac, r, V
+  External V
+
+  fac = dr**2 * (2.d0 * ReduceMass / Hbar**2)
+  r = R_min + dr * ir
+  cc = (0.d0, 0.d0)
+  Do i = 1, Nlevel
+    Do j = 1, Nlevel
+      cc(i,j) = -fac / 12.d0 * CPOT(i,j,ir)
+      If (i == j) cc(i,j) = cc(i,j) - fac / 12.d0 * (V(r,L_i) - E) + 1.d0
     End Do
   End Do
-  Close(unit_number)
-End Subroutine WriteNumerovSnapshot
+  Call matinv(Nlevel, cc, cin)
+  Do i = 1, Nlevel
+    Do j = 1, Nlevel
+      fundamental(i,j,ir) = (0.d0, 0.d0)
+      Do k = 1, Nlevel
+        fundamental(i,j,ir) = fundamental(i,j,ir) + cin(i,k) * xi(k,j)
+      End Do
+    End Do
+  End Do
+End Subroutine Keep_Wave_Step
+
+
+Subroutine Write_Waves(P, fundamental, coef, segment_of, maxseg)
+  ! The wave function of the partial wave just solved: u(r) of every channel, with one
+  ! incoming wave in the entrance channel, and P_J.  Three files:
+  !   waves_info.txt  the grid, then E, J, P_J, and P_J from the flux of u at r_min,
+  !                   one line per partial wave
+  !   waves.bin       u(channel, r) of each line, complex(8), radius by radius
+  !   coupling.bin    CPOT(channel, channel, r) on the grid and CPOTH, real(8), once
+  !   matching.txt    the channel energies and Coulomb functions F, G of CCFULL's matching at
+  !                   r_max - dr and r_max + dr, one line per partial wave and channel
+  Use ccfull_initialization_mod
+  Implicit None
+  Real(8), Intent(In) :: P
+  Integer, Intent(In) :: maxseg
+  Complex(8), Intent(In) :: fundamental(Nlevel,Nlevel,0:R_iterat+1)
+  Complex(8), Intent(In) :: coef(Nlevelmax,0:maxseg)
+  Integer, Intent(In) :: segment_of(0:R_iterat+1)
+  Complex(8) :: u(Nlevel,0:R_iterat+1)
+  Real(8) :: k, kk, ech, P_flux, V
+  Real(8) :: ec1, ec2, rho, eta, f1, fp1, g1, gp1, f2, fp2, g2, gp2
+  Integer :: ir, ich, io, coupling_unit, iv
+  Integer, Save :: info_unit, wave_unit, matching_unit
+  Logical, Save :: opened = .False.
+  External V
+
+  If (.Not. opened) Then
+    Open(Newunit=info_unit, File='waves_info.txt', Status='Replace', Action='Write')
+    Write(info_unit,'(A)') '# CCFULL wave functions, one line per partial wave, in the order of waves.bin'
+    Write(info_unit,'(A)') '# channels, radial points, r_min (fm), dr (fm), reduced mass (MeV), Zp, Zt'
+    Write(info_unit,'(2I8,3ES25.16,2I6)') Nlevel, R_iterat+2, R_min, dr, ReduceMass, Zpro, Ztar
+    Write(info_unit,'(A)') '# E (MeV), J, P_J, P_J from the flux of u at r_min'
+    Open(Newunit=wave_unit, File='waves.bin', Status='Replace', Access='Stream', &
+         Form='Unformatted', Action='Write')
+    Open(Newunit=coupling_unit, File='coupling.bin', Status='Replace', Access='Stream', &
+         Form='Unformatted', Action='Write')
+    Write(coupling_unit) CPOT(1:Nlevel,1:Nlevel,0:R_iterat+1), CPOTH(1:Nlevel,1:Nlevel)
+    Close(coupling_unit)
+    Open(Newunit=matching_unit, File='matching.txt', Status='Replace', Action='Write')
+    Write(matching_unit,'(A)') '# E (MeV), J, channel, channel energy at r_max - dr and at r_max + dr (MeV),'
+    Write(matching_unit,'(A)') '# F and G at r_max - dr, F and G at r_max + dr (zero for a closed channel)'
+    opened = .True.
+  End If
+
+  ! u(r): the basis solutions with the coefficients of the stabilization segment of r
+  Do ir = 0, R_iterat+1
+    Do ich = 1, Nlevel
+      u(ich,ir) = (0.d0, 0.d0)
+      Do io = 1, Nlevel
+        u(ich,ir) = u(ich,ir) + fundamental(ich,io,ir) * coef(io,segment_of(ir))
+      End Do
+    End Do
+  End Do
+
+  ! Each open channel's basis wave has unit modulus at r_min: a check of P_J.
+  P_flux = 0.d0
+  kk = sqrt(2.d0 * ReduceMass / Hbar**2 * E)
+  Do ich = 1, Nlevel
+    ech = E - V(R_min, L_i) - CPOT(ich,ich,0)
+    If (ech > 0.d0) Then
+      k = sqrt(2.d0 * ReduceMass / Hbar**2 * ech)
+      P_flux = P_flux + abs(u(ich,0))**2 * k / kk
+    End If
+  End Do
+
+  Write(info_unit,'(ES25.16,I6,2ES25.16)') Real(E,8), L_i, P, P_flux
+  Write(wave_unit) u
+
+  ! The Coulomb functions of the matching in Numerov, with the same channel energies
+  Do ich = 1, Nlevel
+    ec1 = E - CPOT(ich,ich,R_iterat-1)
+    ec2 = E - CPOT(ich,ich,R_iterat+1)
+    f1 = 0.d0; g1 = 0.d0; f2 = 0.d0; g2 = 0.d0
+    If (ec1 >= 0.d0) Then
+      rho = Sqrt(2.d0 * ReduceMass * ec1) / Hbar * (R_max - dr)
+      eta = (Zpro * Ztar / 137.d0) * Sqrt(ReduceMass / (2.d0 * ec1))
+      Call myCOULFG(L_i*1.d0, eta, rho, f1, fp1, g1, gp1, iv)
+      rho = Sqrt(2.d0 * ReduceMass * ec2) / Hbar * (R_max + dr)
+      eta = (Zpro * Ztar / 137.d0) * Sqrt(ReduceMass / (2.d0 * ec2))
+      Call myCOULFG(L_i*1.d0, eta, rho, f2, fp2, g2, gp2, iv)
+    End If
+    Write(matching_unit,'(ES25.16,2I6,6ES25.16)') Real(E,8), L_i, ich, ec1, ec2, f1, g1, f2, g2
+  End Do
+  Flush(info_unit)
+  Flush(wave_unit)
+  Flush(matching_unit)
+End Subroutine Write_Waves
+
 
 Subroutine myCOULFG(angL,eta,rho,myf,mydf,myg,mydg,iv)
   double precision  angL,eta, rho, myf, mydf,myg,mydg
@@ -2706,6 +2716,7 @@ Program CCFull_Main
   Use ccfull_initialization_mod
   Implicit None
   Integer ::  i, j, ir, ie, il
+  Integer ::  last_solved                                                       ! interface
   Integer ::  Iestep
   Real(8) ::  r, rh, sigma, spin, s0, P_0, P, V
   external V
@@ -2735,6 +2746,7 @@ Program CCFull_Main
     sigma = 0.
     spin  = 0.
     P_0 = 0.
+    last_solved = -1                                                            ! interface
 
     Do il = 0, 200
       L_i = il
@@ -2746,9 +2758,8 @@ Program CCFull_Main
           exit  
       End If
 
-      ! The standalone physical model retains the original observable path.
-      ! Reduced-basis training calls NumerovSnapshot directly from its driver.
       Call Numerov(P)
+      last_solved = L_i                                                         ! interface
       
       sigma = sigma + (2.0D0 * L_i + 1.0D0) * P * pi * Hbar**2 / (2.0D0 * ReduceMass * E) * 10.0D0
       spin  = spin  + (2.0D0 * L_i + 1.0D0) * P * pi * Hbar**2 / (2.0D0 * ReduceMass * E) * 10.0D0 * L_i
@@ -2762,6 +2773,13 @@ Program CCFull_Main
 
     End Do
     !stop
+
+    ! interface: the partial waves after the end of the J sum, up to line 11 of ccfull.inp.
+    ! They are solved for the wave-function output only and do not enter sigma.
+    Do il = last_solved + 1, J_last_written                                    ! interface
+      L_i = il                                                                 ! interface
+      Call Numerov(P)                                                          ! interface
+    End Do                                                                     ! interface
 
     if (sigma < 0.01D0) then
         write(*,'(A,F8.3,A,E15.5,A,F8.5,A,E15.5)') ' E = ', E, ' MeV,   Sigma = ', sigma, &
