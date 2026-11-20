@@ -1,6 +1,6 @@
-34S_168Er_Local_Channel6_Snap300_POD80_EIM40
+34S_168Er_Local_Channel7_Snap300_POD80_EIM48
 emulator/training_data
-48
+60
 latin_hypercube
 0.3453,-0.0258,0.0293,394.37,0.7948,1.3674
 100,20261110
@@ -21,7 +21,7 @@ the dashed line is read.  Paths are relative to the project root.  The trained
 parameter box, energy range, and experimental data come from the model.
 
  1   name of the trained model, global or local, e.g.
-     34S_168Er_Local_Channel6_Snap300_POD80_EIM40.
+     34S_168Er_Local_Channel7_Snap300_POD80_EIM48.
  2   folder of the trained models (line 12 of emulator_train.in).
  3   basis rank: 0 uses the trained rank.  A smaller rank keeps the leading
      POD vectors and gives the same result as a training at that rank.  For a

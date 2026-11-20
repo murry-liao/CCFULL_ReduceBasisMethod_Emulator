@@ -39,18 +39,18 @@ CCFULL definitions.
 
 ## How it works
 
-The numbers below belong to the `34S + 168Er` example in this repository (six
+The numbers below belong to the `34S + 168Er` example in this repository (seven
 channels).
 
 ```text
  Offline (once per training box)                Online (per parameter point θ)
  ---------------------------------              ---------------------------------
  1. exact Numerov snapshots: 4000 points        1. potential at the EIM nodes only
-    of a Latin hypercube in                        (31 radial points)
-    (β2, β4, β6, V0, r0, a0, E, J)              2. EIM coefficients (40 numbers)
+    of a Latin hypercube in                        (42 radial points)
+    (β2, β4, β6, V0, r0, a0, E, J)              2. EIM coefficients (48 numbers)
  2. one POD basis for all snapshots, rank 300   3. for every energy E and partial
  3. joint CC-EIM of the coupling field:            wave J: assemble the reduced
-    21 matrix elements, 40 modes                   matrix (300x300 global, 80x80
+    28 matrix elements, 48 modes                   matrix (300x300 global, 80x80
  4. Galerkin projection of all operators           local), solve -> P_J
  5. local model (optional, separate): for       4. sigma_fus = (pi hbar^2 / 2 mu E)
     every (E, J) of the measured energies, a          * sum_J (2J+1) P_J
@@ -122,7 +122,6 @@ python -m emulator.mcmc --config emulator/emulator_mcmc_34S_168Er.in    # Bayesi
 │   ├── train_local.py               reads emulator_train.in; the local model
 │   ├── train_global.py              reads emulator_train.in; the global model
 │   ├── run_rom.py                   reads emulator_rom.in; predictions and the accuracy check
-│   ├── mcmc.py                      reads emulator_mcmc_*.in; Bayesian calibration
 │   ├── ccfull_run.py                writes ccfull.inp, runs CCFULL, reads its output and the data files
 │   ├── coupling.py                  CCFULL's coupling matrix in Python (rotational target)
 │   ├── rom.py                       the reduced model, and the CC-EIM fit and projection of the training

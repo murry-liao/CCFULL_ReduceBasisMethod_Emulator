@@ -12,7 +12,9 @@ Steps (the lines of emulator_train.in are explained at its end):
      every point solving the same partial waves; the corners of the box set how many are kept.
      For every J, the POD of its snapshots and the Numerov equations projected onto the
      leading vectors; the outer boundary comes from a run at the nominal point.  One file per
-     energy.
+     energy.  The snapshots of an energy wait in a temporary file on disk, so that memory holds
+     those of one J at a time (41 MB for 300 points, against 4.5 GB for all 110 partial waves
+     of the highest energy).
   5. The manifest, and copies of the CCFULL records and of the interface program.
 """
 
@@ -22,6 +24,7 @@ import json
 import math
 import os
 import shutil
+import tempfile
 import time
 
 for variable in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "OMP_NUM_THREADS"):
@@ -32,6 +35,24 @@ import numpy as np
 from emulator import rom
 from emulator.ccfull_run import PROJECT, data_lines, numbers, project_path, read_experimental, wave_functions
 from emulator.coupling import partial_wave_count, reaction
+
+
+def write_snapshots(path, k, count, vectors):
+    """Put the unit-norm vectors (J, r x channel) of training point k into the snapshot file of an
+    energy, which holds (J, point, r x channel) in single precision."""
+    vectors = np.ascontiguousarray(vectors, dtype=np.complex64)
+    row = vectors.shape[1] * vectors.itemsize
+    with open(path, "r+b") as file:
+        for J, vector in enumerate(vectors):
+            file.seek((J * count + k) * row)
+            file.write(vector.tobytes())
+
+
+def read_snapshots(path, J, count, size):
+    """The snapshots (point, r x channel) of partial wave J, from the file of write_snapshots."""
+    itemsize = np.dtype(np.complex64).itemsize
+    return np.fromfile(path, dtype=np.complex64, count=count * size,
+                       offset=J * count * size * itemsize).reshape(count, size)
 
 
 def main():
@@ -118,28 +139,38 @@ def main():
         for theta in corners:
             run = wave_functions(records, theta, energy, r_min, n - 1)
             reached = max(reached, rom.partial_waves_in_sum(run["P"], run["J"]))
-        snapshots = np.empty((n, count, radius.size * channels), dtype=np.complex64)    # (J, point, r x channel)
-        for k, theta in enumerate(points):
-            run = wave_functions(records, theta, energy, r_min, n - 1)
-            reached = max(reached, rom.partial_waves_in_sum(run["P"], run["J"]))
-            vectors = run["waves"][:n].reshape(n, -1)
-            snapshots[:, k] = vectors / np.linalg.norm(vectors, axis=1)[:, None]
-        nominal_run = wave_functions(records, nominal, energy, r_min)
-        ccfull_seconds += time.perf_counter() - solving
-        kept = min(n, reached + 5)
-        ratio, source = rom.outer_boundary(grid, nominal_run["matching"], kept)
-        blocks = [rom.local_block(snapshots[J], J, e, rank, grid, fields, ratio[J], source[J]) for J in range(kept)]
+        size = radius.size * channels
+        with tempfile.TemporaryDirectory(prefix="ccfull-rom-snapshots-") as scratch:
+            path = os.path.join(scratch, "snapshots.bin")                # (J, point, r x channel)
+            with open(path, "wb") as file:
+                file.truncate(n * count * size * np.dtype(np.complex64).itemsize)
+            for k, theta in enumerate(points):
+                run = wave_functions(records, theta, energy, r_min, n - 1)
+                reached = max(reached, rom.partial_waves_in_sum(run["P"], run["J"]))
+                vectors = run["waves"][:n].reshape(n, -1)
+                write_snapshots(path, k, count, vectors / np.linalg.norm(vectors, axis=1)[:, None])
+            nominal_run = wave_functions(records, nominal, energy, r_min)
+            ccfull_seconds += time.perf_counter() - solving
+            kept = min(n, reached + 5)
+            ratio, source = rom.outer_boundary(grid, nominal_run["matching"], kept)
+            # Each block goes straight into the arrays of the file; a_modes is kept in single precision.
+            arrays = {"a0": np.zeros((kept, rank, rank), dtype=complex),
+                      "a_modes": np.zeros((len(fields), kept, rank, rank), dtype=np.complex64),
+                      "x0": np.zeros((kept, channels, rank), dtype=complex),
+                      "x1": np.zeros((kept, channels, rank), dtype=complex),
+                      "rhs": np.zeros((kept, rank), dtype=complex), "tail": np.zeros(kept)}
+            for J in range(kept):
+                block = rom.local_block(read_snapshots(path, J, count, size), J, e, rank, grid, fields,
+                                        ratio[J], source[J])
+                arrays["a_modes"][:, J] = block["a_modes"]
+                for key in ("a0", "x0", "x1", "rhs", "tail"):
+                    arrays[key][J] = block[key]
         file = f"energy_{index:03d}.npz"
-        np.savez(folder / file, energy=float(energy), waves=np.arange(kept),
-                 a0=np.array([b["a0"] for b in blocks]),
-                 a_modes=np.ascontiguousarray(np.array([b["a_modes"] for b in blocks]).transpose(1, 0, 2, 3),
-                                              dtype=np.complex64),
-                 x0=np.array([b["x0"] for b in blocks]), x1=np.array([b["x1"] for b in blocks]),
-                 rhs=np.array([b["rhs"] for b in blocks]), tail=np.array([b["tail"] for b in blocks]))
+        np.savez(folder / file, energy=float(energy), waves=np.arange(kept), **arrays)
         files.append({"energy_mev": float(energy), "file": file, "partial_waves": kept, "partial_waves_solved": n})
-        tails.extend(b["tail"] for b in blocks)
+        tails.extend(arrays["tail"].tolist())
         print(f"[local] {index + 1}/{len(energies)}  E = {energy:.4f} MeV: {kept} of {n} partial waves, largest "
-              f"POD tail {max(b['tail'] for b in blocks):.1e}; {time.perf_counter() - started:.0f} s", flush=True)
+              f"POD tail {arrays['tail'].max():.1e}; {time.perf_counter() - started:.0f} s", flush=True)
 
     # 5. The manifest, and copies of the CCFULL records and of the interface program.
     (folder / "ccfull.inp").write_text("\n".join(records) + f"\n{r_min!r}\n")
